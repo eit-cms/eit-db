@@ -360,3 +360,41 @@ func NewValidationError(code, message string) *ValidationError {
 		Message: message,
 	}
 }
+
+// ==================== Schema Registry ====================
+
+// SchemaRegistry Schema 注册表，便于查找和管理多个 Schema
+type SchemaRegistry struct {
+	schemas map[string]Schema
+}
+
+// NewSchemaRegistry 创建空的 Schema 注册表
+func NewSchemaRegistry() *SchemaRegistry {
+	return &SchemaRegistry{
+		schemas: make(map[string]Schema),
+	}
+}
+
+// Register 注册一个 Schema
+func (r *SchemaRegistry) Register(name string, schema Schema) {
+	r.schemas[name] = schema
+}
+
+// Get 获取指定名称的 Schema
+func (r *SchemaRegistry) Get(name string) Schema {
+	return r.schemas[name]
+}
+
+// GetAllSchemaNames 获取所有已注册的 Schema 名称
+func (r *SchemaRegistry) GetAllSchemaNames() []string {
+	names := make([]string, 0, len(r.schemas))
+	for name := range r.schemas {
+		names = append(names, name)
+	}
+	return names
+}
+
+// Timestamp 获取当前时间（用于 created_at/updated_at 字段）
+func Timestamp() time.Time {
+	return time.Now()
+}
