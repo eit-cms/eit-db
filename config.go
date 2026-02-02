@@ -1,39 +1,76 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// ConfigFile 配置文件结构 (从 YAML 加载)
+// ConfigFile 配置文件结构 (从 YAML 或 JSON 加载)
 type ConfigFile struct {
-	Database *Config `yaml:"database"`
+	Database *Config `yaml:"database" json:"database"`
 }
 
-// LoadConfig 从文件加载数据库配置
+// LoadConfig 从文件加载数据库配置（支持 JSON 和 YAML 格式）
 func LoadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var cf ConfigFile
-	if err := yaml.Unmarshal(data, &cf); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	var config *Config
 
-	if cf.Database == nil {
-		return nil, fmt.Errorf("database configuration not found in config file")
+	switch ext {
+	case ".json":
+		// 先尝试解析为直接的 Config 对象
+		if err := json.Unmarshal(data, &config); err == nil && config != nil && config.Adapter != "" {
+			// 成功解析为直接的 Config 对象
+		} else {
+			// 尝试解析为 ConfigFile 包装结构
+			var cf ConfigFile
+			if err := json.Unmarshal(data, &cf); err != nil {
+				return nil, fmt.Errorf("failed to parse JSON config: %w", err)
+			}
+			if cf.Database == nil {
+				return nil, fmt.Errorf("database configuration not found in JSON config file")
+			}
+			config = cf.Database
+		}
+
+	case ".yaml", ".yml":
+		// 使用 YAML 解析器
+		var cf ConfigFile
+		if err := yaml.Unmarshal(data, &cf); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML config: %w", err)
+		}
+		if cf.Database == nil {
+			return nil, fmt.Errorf("database configuration not found in YAML config file")
+		}
+		config = cf.Database
+
+	default:
+		// 默认使用 YAML 解析器
+		var cf ConfigFile
+		if err := yaml.Unmarshal(data, &cf); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
+		if cf.Database == nil {
+			return nil, fmt.Errorf("database configuration not found in config file")
+		}
+		config = cf.Database
 	}
 
 	// 验证配置
-	if err := cf.Database.Validate(); err != nil {
+	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid database configuration: %w", err)
 	}
 
-	return cf.Database, nil
+	return config, nil
 }
 
 // LoadConfigWithDefaults 从文件加载配置并应用默认值
