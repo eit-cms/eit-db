@@ -27,6 +27,12 @@ type Adapter interface {
 
 	// 获取底层连接 (用于 GORM 等高级操作)
 	GetRawConn() interface{}
+
+	// 定时任务管理 - 允许数据库通过自己的方式实现后台任务
+	// 例如: PostgreSQL 使用触发器 + pg_cron, MySQL 使用 EVENT, 应用层使用 cron 库
+	RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error
+	UnregisterScheduledTask(ctx context.Context, taskName string) error
+	ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error)
 }
 
 // Tx 定义事务接口
@@ -208,4 +214,52 @@ func (r *Repository) GetAdapter() Adapter {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.adapter
+}
+
+// RegisterScheduledTask 注册定时任务
+// 支持按月自动创建表等后台任务，具体实现由各个适配器决定：
+//   - PostgreSQL: 使用触发器和 pg_cron 扩展
+//   - MySQL: 使用 MySQL EVENT
+//   - SQLite/其他: 建议由应用层通过 cron 库处理
+func (r *Repository) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.adapter == nil {
+		return fmt.Errorf("adapter is not initialized")
+	}
+
+	if err := task.Validate(); err != nil {
+		return fmt.Errorf("invalid task configuration: %w", err)
+	}
+
+	return r.adapter.RegisterScheduledTask(ctx, task)
+}
+
+// UnregisterScheduledTask 注销定时任务
+func (r *Repository) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.adapter == nil {
+		return fmt.Errorf("adapter is not initialized")
+	}
+
+	if taskName == "" {
+		return fmt.Errorf("task name cannot be empty")
+	}
+
+	return r.adapter.UnregisterScheduledTask(ctx, taskName)
+}
+
+// ListScheduledTasks 列出所有已注册的定时任务
+func (r *Repository) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if r.adapter == nil {
+		return nil, fmt.Errorf("adapter is not initialized")
+	}
+
+	return r.adapter.ListScheduledTasks(ctx)
 }

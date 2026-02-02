@@ -186,6 +186,116 @@ func (a *PostgreSQLAdapter) GetGormDB() *gorm.DB {
 	return a.db
 }
 
+// RegisterScheduledTask 在 PostgreSQL 中注册定时任务
+// 使用 PostgreSQL 的触发器 + 函数来实现按月自动创建表的功能
+func (a *PostgreSQLAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	if task == nil {
+		return fmt.Errorf("task cannot be nil")
+	}
+
+	if err := task.Validate(); err != nil {
+		return err
+	}
+
+	switch task.Type {
+	case TaskTypeMonthlyTableCreation:
+		return a.registerMonthlyTableCreation(ctx, task)
+	default:
+		return fmt.Errorf("unsupported task type for PostgreSQL: %s", task.Type)
+	}
+}
+
+// registerMonthlyTableCreation 注册按月自动创建表的任务
+func (a *PostgreSQLAdapter) registerMonthlyTableCreation(ctx context.Context, task *ScheduledTaskConfig) error {
+	config := task.GetMonthlyTableConfig()
+
+	tableName, _ := config["tableName"].(string)
+	monthFormat, _ := config["monthFormat"].(string)
+	fieldDefs, _ := config["fieldDefinitions"].(string)
+
+	// 创建存储过程：create_monthly_log_table
+	createProcSQL := fmt.Sprintf(`
+CREATE OR REPLACE FUNCTION %s_create_table()
+RETURNS void AS $$
+DECLARE
+	new_table_name TEXT;
+	full_sql TEXT;
+BEGIN
+	new_table_name := '%s_' || TO_CHAR(CURRENT_DATE + INTERVAL '1 month', '%s');
+	
+	IF NOT EXISTS (
+		SELECT 1 FROM information_schema.tables 
+		WHERE table_schema = 'public' 
+		AND table_name = new_table_name
+	) THEN
+		full_sql := 'CREATE TABLE ' || new_table_name || ' (%s)';
+		EXECUTE full_sql;
+		RAISE NOTICE 'Created table: %%', new_table_name;
+	END IF;
+END;
+$$ LANGUAGE plpgsql;
+	`, task.Name, tableName, monthFormat, fieldDefs)
+
+	if err := a.db.WithContext(ctx).Exec(createProcSQL).Error; err != nil {
+		return fmt.Errorf("failed to create function %s_create_table: %w", task.Name, err)
+	}
+
+	// 预热当前月份的表
+	warmTableSQL := fmt.Sprintf(`
+DO $$
+DECLARE
+	table_name TEXT;
+	full_sql TEXT;
+BEGIN
+	FOR i IN 0..0 LOOP
+		table_name := '%s_' || TO_CHAR(CURRENT_DATE + (i || ' months')::INTERVAL, '%s');
+		
+		IF NOT EXISTS (
+			SELECT 1 FROM information_schema.tables 
+			WHERE table_schema = 'public' 
+			AND table_name = table_name
+		) THEN
+			full_sql := 'CREATE TABLE ' || table_name || ' (%s)';
+			EXECUTE full_sql;
+			RAISE NOTICE 'Pre-warmed table: %%', table_name;
+		END IF;
+	END LOOP;
+END $$;
+	`, tableName, monthFormat, fieldDefs)
+
+	if err := a.db.WithContext(ctx).Exec(warmTableSQL).Error; err != nil {
+		return fmt.Errorf("failed to pre-warm tables: %w", err)
+	}
+
+	return nil
+}
+
+// UnregisterScheduledTask 注销定时任务
+func (a *PostgreSQLAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	if taskName == "" {
+		return fmt.Errorf("task name cannot be empty")
+	}
+
+	// 删除存储过程
+	dropFuncSQL := fmt.Sprintf(`
+		DROP FUNCTION IF EXISTS %s_create_table() CASCADE;
+	`, taskName)
+
+	if err := a.db.WithContext(ctx).Exec(dropFuncSQL).Error; err != nil {
+		return fmt.Errorf("failed to drop function %s_create_table: %w", taskName, err)
+	}
+
+	return nil
+}
+
+// ListScheduledTasks 列出所有已注册的定时任务
+// PostgreSQL 版本返回空列表，因为存储过程的管理比较复杂
+func (a *PostgreSQLAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	// PostgreSQL 适配器目前不支持列举动态注册的任务
+	// 应用层应该维护已注册任务的列表
+	return make([]*ScheduledTaskStatus, 0), nil
+}
+
 // PostgreSQLTx PostgreSQL 事务实现
 type PostgreSQLTx struct {
 	tx *sql.Tx

@@ -261,6 +261,18 @@ func (ta *txAdapter) GetRawConn() interface{} {
 	return ta.tx
 }
 
+func (ta *txAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	return fmt.Errorf("scheduled tasks cannot be registered within a transaction")
+}
+
+func (ta *txAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	return fmt.Errorf("scheduled tasks cannot be unregistered within a transaction")
+}
+
+func (ta *txAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	return nil, fmt.Errorf("cannot list scheduled tasks within a transaction")
+}
+
 // ==================== 链式操作辅助类 ====================
 
 // QueryChain 链式查询构建器

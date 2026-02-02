@@ -168,6 +168,22 @@ func (a *MySQLAdapter) GetGormDB() *gorm.DB {
 	return a.db
 }
 
+// RegisterScheduledTask MySQL 适配器暂不支持通过 EVENT 方式实现定时任务
+// 建议在应用层使用 cron 库处理定时任务
+func (a *MySQLAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	return fmt.Errorf("MySQL adapter: scheduled tasks not implemented. Please implement in application layer using cron scheduler")
+}
+
+// UnregisterScheduledTask MySQL 适配器暂不支持
+func (a *MySQLAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	return fmt.Errorf("MySQL adapter: scheduled tasks not implemented")
+}
+
+// ListScheduledTasks MySQL 适配器暂不支持
+func (a *MySQLAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	return nil, fmt.Errorf("MySQL adapter: scheduled tasks not implemented")
+}
+
 // MySQLTx MySQL 事务实现
 type MySQLTx struct {
 	tx *sql.Tx

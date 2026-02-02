@@ -135,6 +135,22 @@ func (a *SQLiteAdapter) GetGormDB() *gorm.DB {
 	return a.db
 }
 
+// RegisterScheduledTask SQLite 适配器暂不支持通过触发器方式实现定时任务
+// 建议在应用层使用 cron 库处理定时任务
+func (a *SQLiteAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	return fmt.Errorf("SQLite adapter: scheduled tasks not implemented. Please implement in application layer using cron scheduler")
+}
+
+// UnregisterScheduledTask SQLite 适配器暂不支持
+func (a *SQLiteAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	return fmt.Errorf("SQLite adapter: scheduled tasks not implemented")
+}
+
+// ListScheduledTasks SQLite 适配器暂不支持
+func (a *SQLiteAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	return nil, fmt.Errorf("SQLite adapter: scheduled tasks not implemented")
+}
+
 // SQLiteTx SQLite 事务实现
 type SQLiteTx struct {
 	tx *sql.Tx
