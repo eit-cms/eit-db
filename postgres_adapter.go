@@ -224,9 +224,9 @@ BEGIN
 	new_table_name := '%s_' || TO_CHAR(CURRENT_DATE + INTERVAL '1 month', '%s');
 	
 	IF NOT EXISTS (
-		SELECT 1 FROM information_schema.tables 
-		WHERE table_schema = 'public' 
-		AND table_name = new_table_name
+		SELECT 1 FROM information_schema.tables t
+		WHERE t.table_schema = 'public' 
+		AND t.table_name = new_table_name
 	) THEN
 		full_sql := 'CREATE TABLE ' || new_table_name || ' (%s)';
 		EXECUTE full_sql;
@@ -244,20 +244,20 @@ $$ LANGUAGE plpgsql;
 	warmTableSQL := fmt.Sprintf(`
 DO $$
 DECLARE
-	table_name TEXT;
+	table_name_var TEXT;
 	full_sql TEXT;
 BEGIN
 	FOR i IN 0..0 LOOP
-		table_name := '%s_' || TO_CHAR(CURRENT_DATE + (i || ' months')::INTERVAL, '%s');
+		table_name_var := '%s_' || TO_CHAR(CURRENT_DATE + (i || ' months')::INTERVAL, '%s');
 		
 		IF NOT EXISTS (
-			SELECT 1 FROM information_schema.tables 
-			WHERE table_schema = 'public' 
-			AND table_name = table_name
+			SELECT 1 FROM information_schema.tables t
+			WHERE t.table_schema = 'public' 
+			AND t.table_name = table_name_var
 		) THEN
-			full_sql := 'CREATE TABLE ' || table_name || ' (%s)';
+			full_sql := 'CREATE TABLE ' || table_name_var || ' (%s)';
 			EXECUTE full_sql;
-			RAISE NOTICE 'Pre-warmed table: %%', table_name;
+			RAISE NOTICE 'Pre-warmed table: %%', table_name_var;
 		END IF;
 	END LOOP;
 END $$;
