@@ -41,30 +41,56 @@ func (a *PostgreSQLAdapter) Connect(ctx context.Context, config *Config) error {
 		config = a.config
 	}
 
+	// 验证必需字段
 	if config.Host == "" {
 		config.Host = "localhost"
 	}
 	if config.Port == 0 {
 		config.Port = 5432
 	}
+	if config.Username == "" {
+		return fmt.Errorf("PostgreSQL: username is required")
+	}
+	if config.Database == "" {
+		return fmt.Errorf("PostgreSQL: database name is required")
+	}
 	if config.SSLMode == "" {
 		config.SSLMode = "disable"
 	}
 
+	// 处理空密码（支持trust和ident认证）
+	password := config.Password
+
 	// 构建 DSN (Data Source Name)
-	dsn := fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Host,
-		config.Port,
-		config.Username,
-		config.Password,
-		config.Database,
-		config.SSLMode,
-	)
+	// lib/pq 格式: postgres://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
+	// 或使用键值格式: host=localhost port=5432 user=postgres password=secret dbname=mydb
+	var dsn string
+	if password != "" {
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			config.Host,
+			config.Port,
+			config.Username,
+			password,
+			config.Database,
+			config.SSLMode,
+		)
+	} else {
+		// 处理无密码的情况（信任认证）
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s dbname=%s sslmode=%s",
+			config.Host,
+			config.Port,
+			config.Username,
+			config.Database,
+			config.SSLMode,
+		)
+	}
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return fmt.Errorf("failed to connect to PostgreSQL: %w", err)
+		return fmt.Errorf("failed to connect to PostgreSQL (host=%s, port=%d, user=%s, db=%s, ssl=%s): %w", 
+			config.Host, config.Port, config.Username, config.Database, config.SSLMode, err)
 	}
 
 	a.db = db
@@ -76,15 +102,25 @@ func (a *PostgreSQLAdapter) Connect(ctx context.Context, config *Config) error {
 	}
 	a.sqlDB = sqlDB
 
-	// 配置连接池
+	// 配置连接池（使用Config中的Pool设置）
 	if config.Pool != nil {
-		if config.Pool.MaxConnections > 0 {
-			sqlDB.SetMaxOpenConns(config.Pool.MaxConnections)
+		maxConns := config.Pool.MaxConnections
+		if maxConns <= 0 {
+			maxConns = 25
 		}
-		if config.Pool.IdleTimeout > 0 {
-			sqlDB.SetConnMaxIdleTime(time.Duration(config.Pool.IdleTimeout) * time.Second)
+		sqlDB.SetMaxOpenConns(maxConns)
+
+		idleTimeout := config.Pool.IdleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = 300 // 5分钟
+		}
+		sqlDB.SetConnMaxIdleTime(time.Duration(idleTimeout) * time.Second)
+
+		if config.Pool.MaxLifetime > 0 {
+			sqlDB.SetConnMaxLifetime(time.Duration(config.Pool.MaxLifetime) * time.Second)
 		}
 	} else {
+		// 默认连接池配置
 		sqlDB.SetMaxOpenConns(25)
 		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	}
@@ -142,6 +178,11 @@ func (a *PostgreSQLAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx,
 
 // GetRawConn 获取底层连接 (返回 *gorm.DB)
 func (a *PostgreSQLAdapter) GetRawConn() interface{} {
+	return a.db
+}
+
+// GetGormDB 获取GORM实例（用于直接访问GORM）
+func (a *PostgreSQLAdapter) GetGormDB() *gorm.DB {
 	return a.db
 }
 

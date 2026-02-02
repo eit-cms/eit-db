@@ -10,9 +10,30 @@ import (
 // GetGormDB 从 Repository 获取 GORM 实例
 // 用于保持与现有 GORM 代码的兼容性
 func (r *Repository) GetGormDB() *gorm.DB {
-	if adapter, ok := r.adapter.(*gormAdapter); ok {
-		return adapter.db
+	if r.adapter == nil {
+		return nil
 	}
+
+	// 尝试从不同类型的adapter中提取GORM实例
+	switch a := r.adapter.(type) {
+	case *MySQLAdapter:
+		if a != nil {
+			return a.db
+		}
+	case *PostgreSQLAdapter:
+		if a != nil {
+			return a.db
+		}
+	case *SQLiteAdapter:
+		if a != nil {
+			return a.db
+		}
+	case *gormAdapter:
+		if a != nil {
+			return a.db
+		}
+	}
+
 	return nil
 }
 

@@ -41,18 +41,29 @@ func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) error {
 		config = a.config
 	}
 
+	// 验证必需字段
 	if config.Host == "" {
 		config.Host = "localhost"
 	}
 	if config.Port == 0 {
 		config.Port = 3306
 	}
+	if config.Username == "" {
+		return fmt.Errorf("MySQL: username is required")
+	}
+	if config.Database == "" {
+		return fmt.Errorf("MySQL: database name is required")
+	}
+
+	// 处理空密码
+	password := config.Password
 
 	// 构建 DSN (Data Source Name)
+	// 格式: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
 		config.Username,
-		config.Password,
+		password,
 		config.Host,
 		config.Port,
 		config.Database,
@@ -60,7 +71,8 @@ func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) error {
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return fmt.Errorf("failed to connect to MySQL: %w", err)
+		return fmt.Errorf("failed to connect to MySQL (host=%s, port=%d, user=%s, db=%s): %w", 
+			config.Host, config.Port, config.Username, config.Database, err)
 	}
 
 	a.db = db
@@ -72,15 +84,25 @@ func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) error {
 	}
 	a.sqlDB = sqlDB
 
-	// 配置连接池
+	// 配置连接池（使用Config中的Pool设置）
 	if config.Pool != nil {
-		if config.Pool.MaxConnections > 0 {
-			sqlDB.SetMaxOpenConns(config.Pool.MaxConnections)
+		maxConns := config.Pool.MaxConnections
+		if maxConns <= 0 {
+			maxConns = 25
 		}
-		if config.Pool.IdleTimeout > 0 {
-			sqlDB.SetConnMaxIdleTime(time.Duration(config.Pool.IdleTimeout) * time.Second)
+		sqlDB.SetMaxOpenConns(maxConns)
+
+		idleTimeout := config.Pool.IdleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = 300 // 5分钟
+		}
+		sqlDB.SetConnMaxIdleTime(time.Duration(idleTimeout) * time.Second)
+
+		if config.Pool.MaxLifetime > 0 {
+			sqlDB.SetConnMaxLifetime(time.Duration(config.Pool.MaxLifetime) * time.Second)
 		}
 	} else {
+		// 默认连接池配置
 		sqlDB.SetMaxOpenConns(25)
 		sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	}
@@ -138,6 +160,11 @@ func (a *MySQLAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, erro
 
 // GetRawConn 获取底层连接 (返回 *gorm.DB)
 func (a *MySQLAdapter) GetRawConn() interface{} {
+	return a.db
+}
+
+// GetGormDB 获取GORM实例（用于直接访问GORM）
+func (a *MySQLAdapter) GetGormDB() *gorm.DB {
 	return a.db
 }
 

@@ -130,6 +130,11 @@ func (a *SQLiteAdapter) GetRawConn() interface{} {
 	return a.db
 }
 
+// GetGormDB 获取GORM实例（用于直接访问GORM）
+func (a *SQLiteAdapter) GetGormDB() *gorm.DB {
+	return a.db
+}
+
 // SQLiteTx SQLite 事务实现
 type SQLiteTx struct {
 	tx *sql.Tx
