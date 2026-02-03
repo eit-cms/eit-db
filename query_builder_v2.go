@@ -145,6 +145,68 @@ func NewSQLiteDialect() *SQLiteDialect {
 	}
 }
 
+// SQL Server 方言
+type SQLServerDialect struct {
+	nextParamIndex int
+}
+
+func NewSQLServerDialect() *SQLServerDialect {
+	return &SQLServerDialect{
+		nextParamIndex: 1,
+	}
+}
+
+func (d *SQLServerDialect) Name() string {
+	return "sqlserver"
+}
+
+// SQL Server 使用方括号引用标识符
+func (d *SQLServerDialect) QuoteIdentifier(name string) string {
+	return "[" + name + "]"
+}
+
+func (d *SQLServerDialect) QuoteValue(value interface{}) string {
+	if value == nil {
+		return "NULL"
+	}
+	if str, ok := value.(string); ok {
+		return "'" + strings.ReplaceAll(str, "'", "''") + "'"
+	}
+	return fmt.Sprintf("%v", value)
+}
+
+// SQL Server 使用 @p1, @p2 形式的参数
+func (d *SQLServerDialect) GetPlaceholder(index int) string {
+	return fmt.Sprintf("@p%d", index)
+}
+
+// SQL Server 使用 OFFSET...ROWS FETCH...ROWS ONLY 语法
+func (d *SQLServerDialect) GenerateLimitOffset(limit *int, offset *int) string {
+	if limit == nil && offset == nil {
+		return ""
+	}
+	
+	// SQL Server 中 OFFSET 是必须的，没有 OFFSET 则必须用 FETCH FIRST
+	var clause string
+	
+	if offset != nil {
+		clause = fmt.Sprintf("OFFSET %d ROWS", *offset)
+		if limit != nil {
+			clause += fmt.Sprintf(" FETCH NEXT %d ROWS ONLY", *limit)
+		}
+	} else if limit != nil {
+		// 如果只有 LIMIT 没有 OFFSET，使用 FETCH FIRST
+		clause = fmt.Sprintf("OFFSET 0 ROWS FETCH NEXT %d ROWS ONLY", *limit)
+	}
+	
+	return clause
+}
+
+func (d *SQLServerDialect) TranslateCondition(condition Condition, argIndex *int) (string, []interface{}, error) {
+	translator := &DefaultSQLTranslator{dialect: d}
+	return translator.TranslateCondition(condition)
+}
+
 // ==================== SQLQueryBuilder 实现 ====================
 
 // NewSQLQueryConstructor 创建新的 SQL 查询构造器

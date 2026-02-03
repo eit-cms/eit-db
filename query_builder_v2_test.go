@@ -606,6 +606,219 @@ func TestQueryConstructorProvider(t *testing.T) {
 	t.Log("✓ All QueryConstructorProviders work correctly")
 }
 
+// TestSQLServerDialect 测试 SQL Server 方言
+func TestSQLServerDialect(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).Build())
+	schema.AddField(NewField("name", TypeString).Build())
+	schema.AddField(NewField("age", TypeInteger).Build())
+
+	dialect := NewSQLServerDialect()
+	ctx := context.Background()
+
+	testCases := []struct {
+		name          string
+		builder       func(*SQLQueryConstructor)
+		expectSQL     string
+		expectPattern string
+	}{
+		{
+			"Basic SELECT with SQL Server brackets",
+			func(qc *SQLQueryConstructor) {},
+			"SELECT * FROM [users]",
+			"[users]",
+		},
+		{
+			"WHERE with SQL Server parameter placeholder",
+			func(qc *SQLQueryConstructor) {
+				qc.Where(Eq("name", "John"))
+			},
+			"WHERE [name] = @p1",
+			"@p1",
+		},
+		{
+			"Multiple conditions with parameter numbering",
+			func(qc *SQLQueryConstructor) {
+				qc.Where(Eq("name", "John")).Where(Gt("age", 18))
+			},
+			"@p1",
+			"@p2",
+		},
+		{
+			"SQL Server OFFSET/ROWS FETCH syntax with both limit and offset",
+			func(qc *SQLQueryConstructor) {
+				qc.Limit(10).Offset(20)
+			},
+			"OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY",
+			"FETCH NEXT 10 ROWS ONLY",
+		},
+		{
+			"SQL Server OFFSET/ROWS FETCH with limit only",
+			func(qc *SQLQueryConstructor) {
+				qc.Limit(10)
+			},
+			"OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+			"OFFSET 0 ROWS",
+		},
+	}
+
+	for _, tc := range testCases {
+		qc := NewSQLQueryConstructor(schema, dialect)
+		tc.builder(qc)
+		sql, args, err := qc.Build(ctx)
+
+		if err != nil {
+			t.Errorf("%s: Build failed: %v", tc.name, err)
+			continue
+		}
+
+		if !strings.Contains(sql, tc.expectSQL) {
+			t.Errorf("%s: Expected '%s' in SQL: %s", tc.name, tc.expectSQL, sql)
+		}
+
+		if tc.expectPattern != "" && !strings.Contains(sql, tc.expectPattern) {
+			t.Errorf("%s: Expected pattern '%s' in SQL: %s", tc.name, tc.expectPattern, sql)
+		}
+
+		t.Logf("✓ %s: %s with args %v", tc.name, sql, args)
+	}
+}
+
+// TestSQLServerIdentifierQuoting 测试 SQL Server 的标识符引号
+func TestSQLServerIdentifierQuoting(t *testing.T) {
+	schema := NewBaseSchema("user_accounts")
+	schema.AddField(NewField("user_id", TypeInteger).Build())
+	schema.AddField(NewField("first_name", TypeString).Build())
+
+	dialect := NewSQLServerDialect()
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.Select("first_name").Where(Eq("user_id", 1))
+
+	ctx := context.Background()
+	sql, args, err := qc.Build(ctx)
+
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// 验证使用方括号
+	if !strings.Contains(sql, "[user_accounts]") {
+		t.Errorf("Expected table name with brackets [user_accounts], got: %s", sql)
+	}
+	if !strings.Contains(sql, "[first_name]") {
+		t.Errorf("Expected column name with brackets [first_name], got: %s", sql)
+	}
+	if !strings.Contains(sql, "[user_id]") {
+		t.Errorf("Expected column name with brackets [user_id], got: %s", sql)
+	}
+
+	// 验证参数占位符
+	if !strings.Contains(sql, "@p1") {
+		t.Errorf("Expected @p1 placeholder, got: %s", sql)
+	}
+
+	// 验证参数值
+	if len(args) != 1 || args[0] != 1 {
+		t.Errorf("Expected args [1], got %v", args)
+	}
+
+	t.Logf("✓ SQL Server quoting: %s", sql)
+}
+
+// TestSQLServerComplexQuery 测试 SQL Server 的复杂查询
+func TestSQLServerComplexQuery(t *testing.T) {
+	schema := NewBaseSchema("employees")
+	schema.AddField(NewField("id", TypeInteger).Build())
+	schema.AddField(NewField("name", TypeString).Build())
+	schema.AddField(NewField("salary", TypeInteger).Build())
+	schema.AddField(NewField("department", TypeString).Build())
+
+	dialect := NewSQLServerDialect()
+	qc := NewSQLQueryConstructor(schema, dialect)
+
+	qc.Select("id", "name", "salary").
+		Where(Eq("department", "Engineering")).
+		Where(Gte("salary", 50000)).
+		OrderBy("salary", "DESC").
+		Limit(5).
+		Offset(10)
+
+	ctx := context.Background()
+	sql, args, err := qc.Build(ctx)
+
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// 验证 SQL Server 特定的语法元素
+	if !strings.Contains(sql, "[employees]") {
+		t.Errorf("Expected [employees] table name")
+	}
+
+	if !strings.Contains(sql, "[department]") {
+		t.Errorf("Expected [department] column")
+	}
+
+	if !strings.Contains(sql, "@p1") || !strings.Contains(sql, "@p2") {
+		t.Errorf("Expected @p1 and @p2 parameters, got: %s", sql)
+	}
+
+	if !strings.Contains(sql, "OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY") {
+		t.Errorf("Expected SQL Server pagination syntax, got: %s", sql)
+	}
+
+	// 验证参数值顺序
+	if len(args) != 2 {
+		t.Fatalf("Expected 2 arguments, got %d", len(args))
+	}
+	if args[0] != "Engineering" || args[1] != 50000 {
+		t.Errorf("Expected ['Engineering', 50000], got %v", args)
+	}
+
+	t.Logf("✓ Complex SQL Server query: %s with args %v", sql, args)
+}
+
+// TestSQLServerDialectQuotingComparison 比较不同方言的引号
+func TestSQLServerDialectQuotingComparison(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("name", TypeString).Build())
+
+	ctx := context.Background()
+
+	testCases := []struct {
+		name          string
+		dialect       SQLDialect
+		expectBrackets string
+		expectParam   string
+	}{
+		{"MySQL", NewMySQLDialect(), "`users`", "?"},
+		{"PostgreSQL", NewPostgreSQLDialect(), `"users"`, "$1"},
+		{"SQLite", NewSQLiteDialect(), "`users`", "?"},
+		{"SQL Server", NewSQLServerDialect(), "[users]", "@p1"},
+	}
+
+	for _, tc := range testCases {
+		qc := NewSQLQueryConstructor(schema, tc.dialect)
+		qc.Where(Eq("name", "John"))
+		sql, _, err := qc.Build(ctx)
+
+		if err != nil {
+			t.Errorf("%s: Build failed: %v", tc.name, err)
+			continue
+		}
+
+		if !strings.Contains(sql, tc.expectBrackets) {
+			t.Errorf("%s: Expected '%s' in: %s", tc.name, tc.expectBrackets, sql)
+		}
+
+		if !strings.Contains(sql, tc.expectParam) {
+			t.Errorf("%s: Expected '%s' parameter in: %s", tc.name, tc.expectParam, sql)
+		}
+
+		t.Logf("✓ %s: %s", tc.name, sql)
+	}
+}
+
 // 辅助函数
 func intPtr(v int) *int {
 	return &v
