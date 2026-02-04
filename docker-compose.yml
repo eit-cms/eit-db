@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 15
+  postgres:
+    image: postgres:15-alpine
+    container_name: eit-db-postgres
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "max_connections=100"
+
+  # MySQL 8.0
+  mysql:
+    image: mysql:8.0
+    container_name: eit-db-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_USER: testuser
+      MYSQL_PASSWORD: testpass
+      MYSQL_DATABASE: testdb
+      MYSQL_INITDB_ARGS: "--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci"
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "testuser", "-ptestpass"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "--max_allowed_packet=256M"
+      - "--sort_buffer_size=4M"
+      - "--bulk_insert_buffer_size=16M"
+
+  # SQL Server 2022 (Linux)
+  # 注意：需要至少2GB内存，可选
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: eit-db-sqlserver
+    user: "0:0"
+    entrypoint: /bin/bash -c "chown -R 10001:0 /var/opt/mssql && exec /opt/mssql/bin/sqlservr"
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "Test@1234"
+      MSSQL_PID: "Express"
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Test@1234' -No -C -Q 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 2G
+
+volumes:
+  postgres_data:
+    driver: local
+  mysql_data:
+    driver: local
+  sqlserver_data:
+    driver: local
+
+networks:
+  default:
+    name: eit-db-network

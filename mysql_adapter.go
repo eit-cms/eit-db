@@ -219,6 +219,61 @@ func (a *MySQLAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewMySQLDialect())
 }
 
+// GetDatabaseFeatures 返回 MySQL 数据库特性
+func (a *MySQLAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	return &DatabaseFeatures{
+		// 索引和约束
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   false, // 8.0.13+ functional indexes only
+		SupportsDeferrable:       false,
+		
+		// 自定义类型
+		SupportsEnumType:      true, // Column-level ENUM
+		SupportsCompositeType: false,
+		SupportsDomainType:    false,
+		SupportsUDT:           false,
+		
+		// 函数和过程
+		SupportsStoredProcedures: true,
+		SupportsFunctions:        true,
+		SupportsAggregateFuncs:   false,
+		FunctionLanguages:        []string{"sql"},
+		
+		// 高级查询
+		SupportsWindowFunctions: true, // 8.0+
+		SupportsCTE:             true, // 8.0+
+		SupportsRecursiveCTE:    true, // 8.0+
+		SupportsMaterializedCTE: false,
+		
+		// JSON 支持
+		HasNativeJSON:     true, // 5.7+
+		SupportsJSONPath:  true,
+		SupportsJSONIndex: true, // 8.0+
+		
+		// 全文搜索
+		SupportsFullTextSearch: true,
+		FullTextLanguages:      []string{"english"},
+		
+		// 其他特性
+		SupportsArrays:       false,
+		SupportsGenerated:    true, // 5.7+
+		SupportsReturning:    false,
+		SupportsUpsert:       true, // ON DUPLICATE KEY UPDATE
+		SupportsListenNotify: false,
+		
+		// 元信息
+		DatabaseName:    "MySQL",
+		DatabaseVersion: "8.0+",
+		Description:     "Popular open-source database with good performance",
+	}
+}
+
+// GetQueryFeatures 返回 MySQL 的查询特性
+func (a *MySQLAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewMySQLQueryFeatures()
+}
+
 // init 自动注册 MySQL 适配器
 func init() {
 	RegisterAdapter(&MySQLFactory{})

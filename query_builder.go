@@ -277,6 +277,53 @@ func (ta *txAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewMySQLDialect())
 }
 
+// GetQueryFeatures 返回事务适配器的查询特性 (默认 MySQL)
+func (ta *txAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewMySQLQueryFeatures()
+}
+
+func (ta *txAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	// 事务适配器返回基本的特性集，与 GORM adapter 保持一致
+	return &DatabaseFeatures{
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   false,
+		SupportsDeferrable:       false,
+		
+		SupportsEnumType:      true,
+		SupportsCompositeType: false,
+		SupportsDomainType:    false,
+		SupportsUDT:           false,
+		
+		SupportsStoredProcedures: true,
+		SupportsFunctions:        true,
+		SupportsAggregateFuncs:   false,
+		FunctionLanguages:        []string{"sql"},
+		
+		SupportsWindowFunctions: true,
+		SupportsCTE:             true,
+		SupportsRecursiveCTE:    true,
+		SupportsMaterializedCTE: false,
+		
+		HasNativeJSON:     true,
+		SupportsJSONPath:  true,
+		SupportsJSONIndex: true,
+		
+		SupportsFullTextSearch: true,
+		FullTextLanguages:      []string{"english"},
+		
+		SupportsArrays:       false,
+		SupportsGenerated:    true,
+		SupportsReturning:    false,
+		SupportsUpsert:       true,
+		SupportsListenNotify: false,
+		
+		DatabaseName:    "Transaction Adapter",
+		DatabaseVersion: "Unknown",
+		Description:     "Transaction wrapper adapter",
+	}
+}
+
 // ==================== 链式操作辅助类 ====================
 
 // QueryChain 链式查询构建器

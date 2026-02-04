@@ -18,16 +18,8 @@ type SQLiteAdapter struct {
 	sqlDB  *sql.DB
 }
 
-// SQLiteFactory SQLite 适配器工厂
-type SQLiteFactory struct{}
-
-// Name 返回适配器名称
-func (f *SQLiteFactory) Name() string {
-	return "sqlite"
-}
-
-// Create 创建 SQLite 适配器
-func (f *SQLiteFactory) Create(config *Config) (Adapter, error) {
+// NewSQLiteAdapter 创建 SQLite 适配器
+func NewSQLiteAdapter(config *Config) (*SQLiteAdapter, error) {
 	adapter := &SQLiteAdapter{config: config}
 	if err := adapter.Connect(context.Background(), config); err != nil {
 		return nil, err
@@ -186,7 +178,62 @@ func (a *SQLiteAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewSQLiteDialect())
 }
 
+// GetDatabaseFeatures 返回 SQLite 数据库特性
+func (a *SQLiteAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	return &DatabaseFeatures{
+		// 索引和约束
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   true,
+		SupportsDeferrable:       true,
+		
+		// 自定义类型
+		SupportsEnumType:      false,
+		SupportsCompositeType: false,
+		SupportsDomainType:    false,
+		SupportsUDT:           false,
+		
+		// 函数和过程
+		SupportsStoredProcedures: false,
+		SupportsFunctions:        true,  // ✅ 通过 Go 代码注册！
+		SupportsAggregateFuncs:   true,  // ✅ 也可以通过 Go 注册
+		FunctionLanguages:        []string{"go"}, // 使用 Go 语言注册
+		
+		// 高级查询
+		SupportsWindowFunctions: true, // 3.25+
+		SupportsCTE:             true, // 3.8+
+		SupportsRecursiveCTE:    true,
+		SupportsMaterializedCTE: false,
+		
+		// JSON 支持
+		HasNativeJSON:     false,
+		SupportsJSONPath:  true, // 3.38+ JSON functions
+		SupportsJSONIndex: false,
+		
+		// 全文搜索
+		SupportsFullTextSearch: true, // FTS5 extension
+		FullTextLanguages:      []string{"english"},
+		
+		// 其他特性
+		SupportsArrays:       false,
+		SupportsGenerated:    true, // 3.31+
+		SupportsReturning:    true, // 3.35+
+		SupportsUpsert:       true, // ON CONFLICT
+		SupportsListenNotify: false,
+		
+		// 元信息
+		DatabaseName:    "SQLite",
+		DatabaseVersion: "3.35+",
+		Description:     "Lightweight embedded database with Go function registration support",
+	}
+}
+
+// GetQueryFeatures 返回 SQLite 的查询特性
+func (a *SQLiteAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewSQLiteQueryFeatures()
+}
+
 // init 自动注册 SQLite 适配器
 func init() {
-	RegisterAdapter(&SQLiteFactory{})
+	_ = RegisterAdapterConstructor("sqlite", NewSQLiteAdapter)
 }

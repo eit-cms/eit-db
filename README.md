@@ -36,6 +36,46 @@ database:
     idle_timeout: 300
 ```
 
+**多 Adapter YAML 配置（新）：**
+
+```yaml
+# adapters.yaml
+adapters:
+    primary:
+        adapter: postgres
+        host: localhost
+        port: 5432
+        username: postgres
+        password: ""
+        database: app
+        ssl_mode: disable
+
+    search:
+        adapter: mongodb
+        database: search_db
+        options:
+            uri: "mongodb://localhost:27017"
+```
+
+**使用多 Adapter 配置：**
+
+```go
+registry, err := eit_db.LoadAdapterRegistry("adapters.yaml")
+if err != nil {
+        panic(err)
+}
+
+if err := eit_db.RegisterAdapterConfigs(registry); err != nil {
+        panic(err)
+}
+
+repo, err := eit_db.NewRepositoryFromAdapterConfig("primary")
+if err != nil {
+        panic(err)
+}
+defer repo.Close()
+```
+
 **或使用代码配置：**
 
 ```go
@@ -408,6 +448,62 @@ go test -bench=BenchmarkGetGormDB -benchmem
 - [GORM 文档](https://gorm.io)
 - [Elixir Ecto 文档](https://hexdocs.pm/ecto)
 - [GitHub Repository](https://github.com/deathcodebind/eit-db)
+- [适配器工作流文档](./.dev-docs/ADAPTER_WORKFLOW.md)
+- [测试覆盖范围](./.dev-docs/TEST_COVERAGE.md)
+
+## 🧪 测试
+
+### 单元测试
+
+运行核心库测试：
+
+```bash
+go test ./... -v
+```
+
+### 集成测试
+
+测试所有适配器（SQLite 无需依赖，PostgreSQL/MySQL 需要 Docker）：
+
+```bash
+# 仅 SQLite 测试（推荐开发期间使用）
+go test ./adapter-application-tests -v
+
+# 或使用测试脚本
+./test.sh integration
+
+# 完整测试（启动所有数据库 + 运行测试）
+./test.sh all-keep
+```
+
+### 使用 Docker 运行完整测试
+
+```bash
+# 启动 PostgreSQL、MySQL、SQL Server 容器
+./test.sh start
+
+# 运行所有测试
+./test.sh integration
+
+# 停止容器
+./test.sh stop
+
+# 或一步完成
+./test.sh all
+```
+
+### 测试覆盖范围
+
+详见 [测试覆盖范围文档](./.dev-docs/TEST_COVERAGE.md)
+
+**已验证的功能：**
+
+- ✅ SQLite: CRUD、CTE、窗口函数、JSON、事务、UPSERT
+- ✅ 多适配器管理：反射注册、YAML 配置、工厂模式
+- ✅ QueryFeatures：版本感知、优先级路由、特性声明
+- ⏭️ PostgreSQL：物化视图、数组、全文搜索、JSONB
+- ⏭️ MySQL：全文搜索、JSON、窗口函数、ON DUPLICATE KEY
+- ⏭️ SQL Server：MERGE、递归 CTE、临时表
 
 ## 📝 许可证
 
@@ -419,6 +515,6 @@ MIT License
 
 ---
 
-**最后更新**：2026-02-03  
+**最后更新**：2026-02-04  
 **当前版本**：v0.4.2  
-**下一版本**：v0.4.3 (关系查询支持)
+**下一版本**：v0.5.0 (多适配器+集成测试完成)

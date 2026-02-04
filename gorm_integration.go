@@ -112,6 +112,54 @@ func (a *gormAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewMySQLDialect())
 }
 
+func (a *gormAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	// GORM adapter 默认返回 MySQL 特性（最安全的默认值）
+	// 实际应根据 GORM 的底层驱动类型返回相应特性
+	return &DatabaseFeatures{
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   false,
+		SupportsDeferrable:       false,
+		
+		SupportsEnumType:      true,
+		SupportsCompositeType: false,
+		SupportsDomainType:    false,
+		SupportsUDT:           false,
+		
+		SupportsStoredProcedures: true,
+		SupportsFunctions:        true,
+		SupportsAggregateFuncs:   false,
+		FunctionLanguages:        []string{"sql"},
+		
+		SupportsWindowFunctions: true,
+		SupportsCTE:             true,
+		SupportsRecursiveCTE:    true,
+		SupportsMaterializedCTE: false,
+		
+		HasNativeJSON:     true,
+		SupportsJSONPath:  true,
+		SupportsJSONIndex: true,
+		
+		SupportsFullTextSearch: true,
+		FullTextLanguages:      []string{"english"},
+		
+		SupportsArrays:       false,
+		SupportsGenerated:    true,
+		SupportsReturning:    false,
+		SupportsUpsert:       true,
+		SupportsListenNotify: false,
+		
+		DatabaseName:    "GORM (MySQL-compatible)",
+		DatabaseVersion: "Unknown",
+		Description:     "GORM ORM adapter with MySQL-compatible feature set",
+	}
+}
+
+// GetQueryFeatures 返回 GORM 的查询特性 (默认 MySQL)
+func (a *gormAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewMySQLQueryFeatures()
+}
+
 // gormTx 实现 Tx 接口
 type gormTx struct {
 	tx *gorm.DB

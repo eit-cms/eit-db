@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"sync"
 )
 
@@ -37,6 +38,14 @@ type Adapter interface {
 	// QueryBuilder 提供者接口 (v0.4.1) - 中层转义层
 	// Adapter 通过此接口提供特定数据库的 QueryConstructor 实现
 	GetQueryBuilderProvider() QueryConstructorProvider
+
+	// DatabaseFeatures 声明 (v0.4.3) - 数据库特性声明
+	// 返回此 Adapter 支持的数据库特性集合
+	GetDatabaseFeatures() *DatabaseFeatures
+
+	// QueryFeatures 声明 (v0.4.4) - 查询特性声明
+	// 返回此数据库支持的查询构造特性（JOIN、CTE、窗口函数等）
+	GetQueryFeatures() *QueryFeatures
 }
 
 // Tx 定义事务接口
@@ -99,6 +108,8 @@ type Repository struct {
 var (
 	adapterFactories = make(map[string]AdapterFactory)
 	factoriesMutex   sync.RWMutex
+	adapterConfigRegistry = make(map[string]*Config)
+	configRegistryMutex   sync.RWMutex
 )
 
 // RegisterAdapter 注册适配器工厂
@@ -106,6 +117,126 @@ func RegisterAdapter(factory AdapterFactory) {
 	factoriesMutex.Lock()
 	defer factoriesMutex.Unlock()
 	adapterFactories[factory.Name()] = factory
+}
+
+// adapterConstructorFactory 通过反射调用构造函数创建 Adapter
+type adapterConstructorFactory struct {
+	name string
+	ctor reflect.Value
+	argType reflect.Type
+}
+
+func (f *adapterConstructorFactory) Name() string {
+	return f.name
+}
+
+func (f *adapterConstructorFactory) Create(config *Config) (Adapter, error) {
+	if !f.ctor.IsValid() {
+		return nil, fmt.Errorf("adapter constructor is invalid")
+	}
+	args := []reflect.Value{reflect.ValueOf(config)}
+	results := f.ctor.Call(args)
+	if len(results) != 2 {
+		return nil, fmt.Errorf("adapter constructor must return (Adapter, error)")
+	}
+
+	if errVal := results[1]; !errVal.IsNil() {
+		if err, ok := errVal.Interface().(error); ok {
+			return nil, err
+		}
+		return nil, fmt.Errorf("adapter constructor returned invalid error type")
+	}
+
+	adapterVal := results[0]
+	if !adapterVal.IsValid() || adapterVal.IsNil() {
+		return nil, fmt.Errorf("adapter constructor returned nil adapter")
+	}
+
+	adapter, ok := adapterVal.Interface().(Adapter)
+	if !ok {
+		return nil, fmt.Errorf("adapter constructor return type does not implement Adapter")
+	}
+
+	return adapter, nil
+}
+
+// RegisterAdapterConstructor 使用构造函数动态注册 Adapter
+// 允许的构造函数签名：func(*Config) (Adapter, error) 或 func(*Config) (*T, error)
+func RegisterAdapterConstructor(name string, ctor interface{}) error {
+	if name == "" {
+		return fmt.Errorf("adapter name cannot be empty")
+	}
+	if ctor == nil {
+		return fmt.Errorf("adapter constructor cannot be nil")
+	}
+
+	ctorVal := reflect.ValueOf(ctor)
+	ctorType := ctorVal.Type()
+	if ctorType.Kind() != reflect.Func {
+		return fmt.Errorf("adapter constructor must be a function")
+	}
+	if ctorType.NumIn() != 1 || ctorType.In(0) != reflect.TypeOf(&Config{}) {
+		return fmt.Errorf("adapter constructor must accept *Config")
+	}
+	if ctorType.NumOut() != 2 {
+		return fmt.Errorf("adapter constructor must return (Adapter, error)")
+	}
+	if !ctorType.Out(1).Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+		return fmt.Errorf("adapter constructor must return error as second return value")
+	}
+
+	factory := &adapterConstructorFactory{
+		name:   name,
+		ctor:   ctorVal,
+		argType: ctorType.In(0),
+	}
+	RegisterAdapter(factory)
+	return nil
+}
+
+// RegisterAdapterConfig 注册 Adapter 配置（支持多 Adapter 注册）
+func RegisterAdapterConfig(name string, config *Config) error {
+	if name == "" {
+		return fmt.Errorf("adapter name cannot be empty")
+	}
+	if config == nil {
+		return fmt.Errorf("adapter config cannot be nil")
+	}
+	if err := config.Validate(); err != nil {
+		return fmt.Errorf("invalid adapter config '%s': %w", name, err)
+	}
+
+	configRegistryMutex.Lock()
+	defer configRegistryMutex.Unlock()
+	adapterConfigRegistry[name] = config
+	return nil
+}
+
+// RegisterAdapterConfigs 批量注册 Adapter 配置
+func RegisterAdapterConfigs(configs map[string]*Config) error {
+	for name, cfg := range configs {
+		if err := RegisterAdapterConfig(name, cfg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetAdapterConfig 获取已注册的 Adapter 配置
+func GetAdapterConfig(name string) (*Config, bool) {
+	configRegistryMutex.RLock()
+	defer configRegistryMutex.RUnlock()
+	cfg, ok := adapterConfigRegistry[name]
+	return cfg, ok
+}
+
+// NewRepositoryFromAdapterConfig 通过已注册的 Adapter 配置创建 Repository
+func NewRepositoryFromAdapterConfig(name string) (*Repository, error) {
+	cfg, ok := GetAdapterConfig(name)
+	if !ok {
+		return nil, fmt.Errorf("adapter config not found: %s", name)
+	}
+	return NewRepository(cfg)
 }
 
 // NewRepository 创建新的仓储实例 (通过配置注入)
@@ -211,6 +342,25 @@ func (r *Repository) Begin(ctx context.Context, opts ...interface{}) (Tx, error)
 		return nil, fmt.Errorf("adapter is not initialized")
 	}
 	return r.adapter.Begin(ctx, opts...)
+}
+
+// QueryStruct 查询单个结构体
+// 自动将查询结果映射到结构体
+func (r *Repository) QueryStruct(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
+	row := r.QueryRow(ctx, sql, args...)
+	return ScanStruct(row, dest)
+}
+
+// QueryStructs 查询多个结构体
+// 自动将查询结果映射到结构体切片
+func (r *Repository) QueryStructs(ctx context.Context, dest interface{}, sql string, args ...interface{}) error {
+	rows, err := r.Query(ctx, sql, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return ScanStructs(rows, dest)
 }
 
 // GetAdapter 获取底层适配器 (用于高级操作)

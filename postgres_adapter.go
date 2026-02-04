@@ -331,6 +331,61 @@ func (a *PostgreSQLAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewPostgreSQLDialect())
 }
 
+// GetDatabaseFeatures 返回 PostgreSQL 数据库特性
+func (a *PostgreSQLAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	return &DatabaseFeatures{
+		// 索引和约束
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   true,
+		SupportsDeferrable:       true,
+		
+		// 自定义类型
+		SupportsEnumType:      true,
+		SupportsCompositeType: true,
+		SupportsDomainType:    true,
+		SupportsUDT:           true,
+		
+		// 函数和过程
+		SupportsStoredProcedures: true,
+		SupportsFunctions:        true,
+		SupportsAggregateFuncs:   true,
+		FunctionLanguages:        []string{"plpgsql", "sql", "python", "perl"},
+		
+		// 高级查询
+		SupportsWindowFunctions: true,
+		SupportsCTE:             true,
+		SupportsRecursiveCTE:    true,
+		SupportsMaterializedCTE: true,
+		
+		// JSON 支持
+		HasNativeJSON:     true,
+		SupportsJSONPath:  true,
+		SupportsJSONIndex: true,
+		
+		// 全文搜索
+		SupportsFullTextSearch: true,
+		FullTextLanguages:      []string{"english", "chinese", "japanese"},
+		
+		// 其他特性
+		SupportsArrays:       true,
+		SupportsGenerated:    true,
+		SupportsReturning:    true,
+		SupportsUpsert:       true,
+		SupportsListenNotify: true,
+		
+		// 元信息
+		DatabaseName:    "PostgreSQL",
+		DatabaseVersion: "12+",
+		Description:     "Full-featured enterprise database with extensive type system",
+	}
+}
+
+// GetQueryFeatures 返回 PostgreSQL 的查询特性
+func (a *PostgreSQLAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewPostgreSQLQueryFeatures()
+}
+
 // init 自动注册 PostgreSQL 适配器
 func init() {
 	RegisterAdapter(&PostgreSQLFactory{})

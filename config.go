@@ -15,6 +15,11 @@ type ConfigFile struct {
 	Database *Config `yaml:"database" json:"database"`
 }
 
+// AdapterRegistryFile 多 Adapter 配置文件结构
+type AdapterRegistryFile struct {
+	Adapters map[string]*Config `yaml:"adapters" json:"adapters"`
+}
+
 // LoadConfig 从文件加载数据库配置（支持 JSON 和 YAML 格式）
 func LoadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
@@ -71,6 +76,51 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return config, nil
+}
+
+// LoadAdapterRegistry 从文件加载多 Adapter 配置（支持 JSON 和 YAML）
+func LoadAdapterRegistry(filename string) (map[string]*Config, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	var registry AdapterRegistryFile
+
+	switch ext {
+	case ".json":
+		if err := json.Unmarshal(data, &registry); err != nil {
+			return nil, fmt.Errorf("failed to parse JSON adapter registry: %w", err)
+		}
+	case ".yaml", ".yml":
+		if err := yaml.Unmarshal(data, &registry); err != nil {
+			return nil, fmt.Errorf("failed to parse YAML adapter registry: %w", err)
+		}
+	default:
+		if err := yaml.Unmarshal(data, &registry); err != nil {
+			return nil, fmt.Errorf("failed to parse adapter registry: %w", err)
+		}
+	}
+
+	if len(registry.Adapters) == 0 {
+		return nil, fmt.Errorf("no adapters found in config file")
+	}
+
+	// 验证每个 adapter 配置
+	for name, cfg := range registry.Adapters {
+		if name == "" {
+			return nil, fmt.Errorf("adapter name cannot be empty")
+		}
+		if cfg == nil {
+			return nil, fmt.Errorf("adapter '%s' config cannot be nil", name)
+		}
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid adapter '%s' config: %w", name, err)
+		}
+	}
+
+	return registry.Adapters, nil
 }
 
 // LoadConfigWithDefaults 从文件加载配置并应用默认值
@@ -143,6 +193,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Database == "" {
 			return fmt.Errorf("%s: database name must be specified", c.Adapter)
+		}
+
+	case "mongodb":
+		if c.Database == "" {
+			return fmt.Errorf("mongodb: database name must be specified")
+		}
+		if c.Options == nil {
+			return fmt.Errorf("mongodb: options must include uri")
+		}
+		uri, _ := c.Options["uri"].(string)
+		if uri == "" {
+			return fmt.Errorf("mongodb: options.uri must be specified")
 		}
 
 	default:

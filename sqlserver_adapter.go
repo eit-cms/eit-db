@@ -220,6 +220,61 @@ func (a *SQLServerAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 	return NewDefaultSQLQueryConstructorProvider(NewSQLServerDialect())
 }
 
+// GetDatabaseFeatures 返回 SQL Server 数据库特性
+func (a *SQLServerAdapter) GetDatabaseFeatures() *DatabaseFeatures {
+	return &DatabaseFeatures{
+		// 索引和约束
+		SupportsCompositeKeys:    true,
+		SupportsCompositeIndexes: true,
+		SupportsPartialIndexes:   true, // Filtered indexes
+		SupportsDeferrable:       false,
+		
+		// 自定义类型
+		SupportsEnumType:      false,
+		SupportsCompositeType: false,
+		SupportsDomainType:    false,
+		SupportsUDT:           true,
+		
+		// 函数和过程
+		SupportsStoredProcedures: true,
+		SupportsFunctions:        true,
+		SupportsAggregateFuncs:   true,
+		FunctionLanguages:        []string{"tsql", "clr"},
+		
+		// 高级查询
+		SupportsWindowFunctions: true,
+		SupportsCTE:             true,
+		SupportsRecursiveCTE:    true,
+		SupportsMaterializedCTE: false,
+		
+		// JSON 支持
+		HasNativeJSON:     false, // Stored as NVARCHAR
+		SupportsJSONPath:  true,  // JSON functions since 2016
+		SupportsJSONIndex: true,  // Via computed columns
+		
+		// 全文搜索
+		SupportsFullTextSearch: true,
+		FullTextLanguages:      []string{"english", "chinese", "japanese"},
+		
+		// 其他特性
+		SupportsArrays:       false,
+		SupportsGenerated:    true, // Computed columns
+		SupportsReturning:    true, // OUTPUT clause
+		SupportsUpsert:       true, // MERGE
+		SupportsListenNotify: false, // Use Service Broker instead
+		
+		// 元信息
+		DatabaseName:    "SQL Server",
+		DatabaseVersion: "2016+",
+		Description:     "Enterprise database with T-SQL and CLR integration",
+	}
+}
+
+// GetQueryFeatures 返回 SQL Server 的查询特性
+func (a *SQLServerAdapter) GetQueryFeatures() *QueryFeatures {
+	return NewSQLServerQueryFeatures()
+}
+
 // init 自动注册 SQL Server 适配器
 func init() {
 	RegisterAdapter(&SQLServerFactory{})

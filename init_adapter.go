@@ -61,6 +61,35 @@ func InitDBWithDefaults(adapterType string) (*Repository, error) {
 	return repo, nil
 }
 
+// InitDBFromAdapterRegistry 从多 Adapter 配置文件初始化指定 adapter
+// configPath: YAML/JSON 配置文件路径
+// adapterName: 在 adapters 中注册的名称
+func InitDBFromAdapterRegistry(configPath, adapterName string) (*Repository, error) {
+	registry, err := LoadAdapterRegistry(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load adapter registry: %w", err)
+	}
+	if err := RegisterAdapterConfigs(registry); err != nil {
+		return nil, fmt.Errorf("failed to register adapter configs: %w", err)
+	}
+
+	repo, err := NewRepositoryFromAdapterConfig(adapterName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create repository: %w", err)
+	}
+
+	if err := repo.Connect(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to connect database: %w", err)
+	}
+
+	if err := repo.Ping(context.Background()); err != nil {
+		return nil, fmt.Errorf("database connection failed: %w", err)
+	}
+
+	log.Printf("Database connected: %s", adapterName)
+	return repo, nil
+}
+
 // InitDBFromEnv 使用环境变量初始化数据库
 // 环境变量:
 //   DB_ADAPTER: 适配器类型 (sqlite/postgres/mysql)

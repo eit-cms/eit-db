@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -76,15 +77,9 @@ func (m *SchemaMigration) DropTable(schema Schema) *SchemaMigration {
 // Up 执行迁移
 func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
 	for _, schema := range m.createSchemas {
-		// 使用 GORM 的 AutoMigrate 创建表
-		gormDB := repo.GetGormDB()
-		if gormDB == nil {
-			return fmt.Errorf("GORM not available for schema migration")
-		}
-		
-		// 创建一个临时的空结构体用于迁移
 		tableName := schema.TableName()
-		if err := gormDB.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id INTEGER)", tableName)).Error; err != nil {
+		createSQL := buildCreateTableSQL(repo, schema)
+		if _, err := repo.Exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", tableName, err)
 		}
 	}
@@ -96,25 +91,209 @@ func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
 	// 先删除 Up 中创建的表
 	for i := len(m.createSchemas) - 1; i >= 0; i-- {
 		schema := m.createSchemas[i]
-		sql := fmt.Sprintf("DROP TABLE IF EXISTS %s", schema.TableName())
-		if _, err := repo.Exec(ctx, sql); err != nil {
+		dropSQL := buildDropTableSQL(repo, schema.TableName())
+		if _, err := repo.Exec(ctx, dropSQL); err != nil {
 			return fmt.Errorf("failed to drop table %s: %w", schema.TableName(), err)
 		}
 	}
 	
 	// 然后恢复 Up 中删除的表
 	for _, schema := range m.dropSchemas {
-		gormDB := repo.GetGormDB()
-		if gormDB == nil {
-			return fmt.Errorf("GORM not available for schema migration")
-		}
-		
 		tableName := schema.TableName()
-		if err := gormDB.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (id INTEGER)", tableName)).Error; err != nil {
+		createSQL := buildCreateTableSQL(repo, schema)
+		if _, err := repo.Exec(ctx, createSQL); err != nil {
 			return fmt.Errorf("failed to recreate table %s: %w", tableName, err)
 		}
 	}
 	return nil
+}
+
+func buildCreateTableSQL(repo *Repository, schema Schema) string {
+	columns := make([]string, 0, len(schema.Fields()))
+	for _, field := range schema.Fields() {
+		columns = append(columns, buildColumnDefinition(repo.GetAdapter(), field))
+	}
+
+	columnsSQL := strings.Join(columns, ", ")
+	tableName := schema.TableName()
+
+	switch repo.GetAdapter().(type) {
+	case *SQLServerAdapter:
+		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL CREATE TABLE %s (%s)", tableName, tableName, columnsSQL)
+	default:
+		return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableName, columnsSQL)
+	}
+}
+
+func buildDropTableSQL(repo *Repository, tableName string) string {
+	switch repo.GetAdapter().(type) {
+	case *SQLServerAdapter:
+		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", tableName, tableName)
+	default:
+		return fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+	}
+}
+
+func buildColumnDefinition(adapter Adapter, field *Field) string {
+	switch adapter.(type) {
+	case *PostgreSQLAdapter:
+		return buildPostgresColumn(field)
+	case *MySQLAdapter:
+		return buildMySQLColumn(field)
+	case *SQLiteAdapter:
+		return buildSQLiteColumn(field)
+	case *SQLServerAdapter:
+		return buildSQLServerColumn(field)
+	default:
+		return buildGenericColumn(field)
+	}
+}
+
+func buildPostgresColumn(field *Field) string {
+	if field.Primary && field.Autoinc {
+		return fmt.Sprintf("%s SERIAL PRIMARY KEY", field.Name)
+	}
+	col := fmt.Sprintf("%s %s", field.Name, mapPostgresType(field.Type))
+	return applyColumnConstraints(col, field)
+}
+
+func buildMySQLColumn(field *Field) string {
+	if field.Primary && field.Autoinc {
+		return fmt.Sprintf("%s INT AUTO_INCREMENT PRIMARY KEY", field.Name)
+	}
+	col := fmt.Sprintf("%s %s", field.Name, mapMySQLType(field.Type))
+	return applyColumnConstraints(col, field)
+}
+
+func buildSQLiteColumn(field *Field) string {
+	if field.Primary && field.Autoinc {
+		return fmt.Sprintf("%s INTEGER PRIMARY KEY AUTOINCREMENT", field.Name)
+	}
+	col := fmt.Sprintf("%s %s", field.Name, mapSQLiteType(field.Type))
+	return applyColumnConstraints(col, field)
+}
+
+func buildSQLServerColumn(field *Field) string {
+	if field.Primary && field.Autoinc {
+		return fmt.Sprintf("%s INT IDENTITY(1,1) PRIMARY KEY", field.Name)
+	}
+	col := fmt.Sprintf("%s %s", field.Name, mapSQLServerType(field.Type))
+	return applyColumnConstraints(col, field)
+}
+
+func buildGenericColumn(field *Field) string {
+	col := fmt.Sprintf("%s %s", field.Name, "TEXT")
+	return applyColumnConstraints(col, field)
+}
+
+func applyColumnConstraints(column string, field *Field) string {
+	if !field.Null {
+		column += " NOT NULL"
+	}
+	if field.Unique {
+		column += " UNIQUE"
+	}
+	return column
+}
+
+func mapPostgresType(fieldType FieldType) string {
+	switch fieldType {
+	case TypeString:
+		return "VARCHAR(255)"
+	case TypeInteger:
+		return "INTEGER"
+	case TypeFloat:
+		return "DOUBLE PRECISION"
+	case TypeBoolean:
+		return "BOOLEAN"
+	case TypeTime:
+		return "TIMESTAMP"
+	case TypeBinary:
+		return "BYTEA"
+	case TypeDecimal:
+		return "DECIMAL(18,2)"
+	case TypeJSON:
+		return "JSONB"
+	case TypeArray:
+		return "TEXT"
+	default:
+		return "TEXT"
+	}
+}
+
+func mapMySQLType(fieldType FieldType) string {
+	switch fieldType {
+	case TypeString:
+		return "VARCHAR(255)"
+	case TypeInteger:
+		return "INT"
+	case TypeFloat:
+		return "FLOAT"
+	case TypeBoolean:
+		return "TINYINT(1)"
+	case TypeTime:
+		return "DATETIME"
+	case TypeBinary:
+		return "LONGBLOB"
+	case TypeDecimal:
+		return "DECIMAL(18,2)"
+	case TypeJSON:
+		return "JSON"
+	case TypeArray:
+		return "TEXT"
+	default:
+		return "TEXT"
+	}
+}
+
+func mapSQLiteType(fieldType FieldType) string {
+	switch fieldType {
+	case TypeString:
+		return "TEXT"
+	case TypeInteger:
+		return "INTEGER"
+	case TypeFloat:
+		return "REAL"
+	case TypeBoolean:
+		return "INTEGER"
+	case TypeTime:
+		return "DATETIME"
+	case TypeBinary:
+		return "BLOB"
+	case TypeDecimal:
+		return "NUMERIC"
+	case TypeJSON:
+		return "TEXT"
+	case TypeArray:
+		return "TEXT"
+	default:
+		return "TEXT"
+	}
+}
+
+func mapSQLServerType(fieldType FieldType) string {
+	switch fieldType {
+	case TypeString:
+		return "NVARCHAR(255)"
+	case TypeInteger:
+		return "INT"
+	case TypeFloat:
+		return "FLOAT"
+	case TypeBoolean:
+		return "BIT"
+	case TypeTime:
+		return "DATETIME2"
+	case TypeBinary:
+		return "VARBINARY(MAX)"
+	case TypeDecimal:
+		return "DECIMAL(18,2)"
+	case TypeJSON:
+		return "NVARCHAR(MAX)"
+	case TypeArray:
+		return "NVARCHAR(MAX)"
+	default:
+		return "NVARCHAR(MAX)"
+	}
 }
 
 // RawSQLMigration 原始 SQL 迁移
