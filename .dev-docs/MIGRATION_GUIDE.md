@@ -2,16 +2,21 @@
 
 ## 概述
 
-eit-migrate 是一个灵活的数据库迁移工具，支持两种迁移方式：
+eit-db-cli 是当前主命令入口，提供灵活的数据库迁移工具能力，支持两种迁移方式：
 1. **Schema-based Migration** - 基于 eit-db Schema 的迁移
 2. **Raw SQL Migration** - 原始 SQL 迁移（支持特定 adapter）
+
+兼容策略：
+
+- `eit-migrate` 作为历史别名继续兼容。
+- 新功能将优先并持续在 `eit-db-cli` 下演进，旧别名仅保证兼容可用。
 
 ## 快速开始
 
 ### 1. 初始化迁移项目
 
 ```bash
-eit-migrate init
+eit-db-cli init
 ```
 
 这会创建以下结构：
@@ -34,12 +39,12 @@ cp .env.example .env
 
 **基于 Schema 的迁移：**
 ```bash
-eit-migrate generate create_users_table
+eit-db-cli generate create_users_table
 ```
 
 **原始 SQL 迁移：**
 ```bash
-eit-migrate generate create_users_table --type sql
+eit-db-cli generate create_users_table --type sql
 ```
 
 ### 4. 编辑迁移文件
@@ -376,10 +381,17 @@ INSERT INTO schema_migrations (version) VALUES ('20260203150405');
 
 | 命令 | 描述 |
 |------|------|
-| `eit-migrate init` | 初始化迁移项目 |
-| `eit-migrate generate <name>` | 生成新的 Schema 迁移 |
-| `eit-migrate generate <name> --type sql` | 生成新的 SQL 迁移 |
-| `eit-migrate version` | 显示工具版本 |
+| `eit-db-cli init` | 初始化迁移项目 |
+| `eit-db-cli generate <name>` | 生成新的 Schema 迁移 |
+| `eit-db-cli generate <name> --type sql` | 生成新的 SQL 迁移 |
+| `eit-db-cli version` | 显示工具版本 |
+
+兼容别名（不建议新文档继续使用）：
+
+- `eit-migrate init`
+- `eit-migrate generate <name>`
+- `eit-migrate generate <name> --type sql`
+- `eit-migrate version`
 
 在 migrations 目录中：
 | 命令 | 描述 |

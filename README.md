@@ -987,9 +987,14 @@ fmt.Println(alt)      // SELECT JSON_EXTRACT_GO(payload, '$.path') FROM ...
 
 如需启用 `JSON_EXTRACT_GO`，可参考 SQLite 自定义函数注册能力（见 `sqlite_custom_functions.go`）。
 
-### 6. 数据库迁移工具 (v0.4.0+)
+### 6. 数据库迁移工具 (v1.0.0+)
 
 EIT-DB 提供了强大的迁移工具，支持两种迁移方式：
+
+> 命令统一说明：
+> - 主入口：`eit-db-cli`
+> - 兼容别名：`eit-migrate`（继续可用）
+> - 兼容策略：旧别名仅做兼容，新功能优先且仅保证在 `eit-db-cli` 下持续演进。
 
 **初始化迁移项目：**
 ```bash
@@ -998,19 +1003,19 @@ go install github.com/eit-cms/eit-db/cmd/eit-migrate@latest
 
 # 或直接构建
 cd /path/to/eit-db
-go build -o ~/bin/eit-migrate ./cmd/eit-migrate
+go build -o ~/bin/eit-db-cli ./cmd/eit-migrate
 
 # 初始化迁移项目
-eit-migrate init
+eit-db-cli init
 ```
 
 **生成迁移文件：**
 ```bash
 # 生成 Schema-based 迁移（类型安全）
-eit-migrate generate create_users_table
+eit-db-cli generate create_users_table
 
 # 生成 Raw SQL 迁移（完全控制）
-eit-migrate generate add_indexes --type sql
+eit-db-cli generate add_indexes --type sql
 ```
 
 **运行迁移：**
@@ -1248,7 +1253,7 @@ go test -bench=. -benchmem
 
 ✅ 全新的数据库迁移工具  
 ✅ 支持 Schema-based 和 Raw SQL 两种迁移方式  
-✅ 命令行工具 eit-migrate  
+✅ 命令行工具（当前主入口 `eit-db-cli`，兼容别名 `eit-migrate`）  
 ✅ 自动版本管理和状态追踪  
 ✅ 支持跨数据库和非关系型数据库  
 

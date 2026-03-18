@@ -2,12 +2,18 @@
 
 本示例演示如何使用新的 migration 系统。
 
+命令入口说明：
+
+- 推荐使用 `eit-db-cli`
+- `eit-migrate` 为兼容别名，旧脚本可继续运行
+- 新功能不会继续为旧别名单独适配
+
 ## 1. 初始化项目
 
 ```bash
 cd /tmp
 mkdir test-migration && cd test-migration
-/Users/huyingjie/dev/go/eit-db/bin/eit-migrate init
+/Users/huyingjie/dev/go/eit-db/bin/eit-db-cli init
 ```
 
 ## 2. 配置数据库
@@ -31,7 +37,7 @@ DB_PASSWORD=
 
 ```bash
 cd /tmp/test-migration
-/Users/huyingjie/dev/go/eit-db/bin/eit-migrate generate create_users_table
+/Users/huyingjie/dev/go/eit-db/bin/eit-db-cli generate create_users_table
 ```
 
 ## 4. 编辑迁移文件
@@ -96,7 +102,7 @@ go run . status
 
 ```bash
 cd /tmp/test-migration
-/Users/huyingjie/dev/go/eit-db/bin/eit-migrate generate add_posts_table --type sql
+/Users/huyingjie/dev/go/eit-db/bin/eit-db-cli generate add_posts_table --type sql
 ```
 
 编辑生成的文件，使用原始 SQL：

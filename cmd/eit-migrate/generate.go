@@ -75,7 +75,7 @@ func generateMigration(migrationDir, name, migrationType string) error {
 
 func generateSchemaMigration(version, name string) string {
 	functionName := toCamelCase(name)
-	
+
 	return fmt.Sprintf(`package main
 
 import (
@@ -123,7 +123,7 @@ func NewMigration_%s_%s() db.MigrationInterface {
 
 func generateRawSQLMigration(version, name string) string {
 	functionName := toCamelCase(name)
-	
+
 	return fmt.Sprintf(`package main
 
 import (
@@ -136,16 +136,16 @@ func NewMigration_%s_%s() db.MigrationInterface {
 
 	// Add your SQL statements here
 	// Example:
-	// migration.AddUpSQL(` + "`" + `
+	// migration.AddUpSQL(`+"`"+`
 	//     CREATE TABLE users (
 	//         id SERIAL PRIMARY KEY,
 	//         name VARCHAR(255) NOT NULL,
 	//         email VARCHAR(255) NOT NULL UNIQUE,
 	//         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	//     )
-	// ` + "`" + `)
+	// `+"`"+`)
 	//
-	// migration.AddDownSQL(` + "`" + `DROP TABLE users` + "`" + `)
+	// migration.AddDownSQL(`+"`"+`DROP TABLE users`+"`"+`)
 	//
 	// For specific database adapters:
 	// migration.ForAdapter("postgres")
@@ -165,11 +165,11 @@ func updateMainGo(migrationDir, version, name string) error {
 	}
 
 	lines := strings.Split(string(content), "\n")
-	
+
 	// 找到 registerMigrations 函数
 	functionName := toCamelCase(name)
 	registrationLine := fmt.Sprintf("\trunner.Register(NewMigration_%s_%s())", version, functionName)
-	
+
 	// 查找注册位置
 	insertIndex := -1
 	for i, line := range lines {
