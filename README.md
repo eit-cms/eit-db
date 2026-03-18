@@ -21,9 +21,9 @@
 go get github.com/eit-cms/eit-db
 ```
 
-### v0.4.1 - 查询构造器三层架构 (2026-02-03)
+### v1.0.0 - 正式发布 (2026-03-18)
 
-**核心改进**：建立查询构造器的三层分离架构，为后续多 Adapter 与 v1.0 收敛打基础
+**核心变化**：完成 API 边界收敛与发布门验证，进入 v1 稳定承诺阶段
 ## 🧪 选型决策树（30 秒）
 
 按下面问题快速判断是否适合使用 EIT-DB：
@@ -1180,6 +1180,18 @@ go test -bench=. -benchmem
 ```
 
 ## 📊 版本更新
+
+### v1.0.0 - 正式版发布 (2026-03-18)
+
+**核心里程碑**：API 边界稳定、发布门验证通过、完成 v1 正式发布
+
+- ✅ 业务写路径统一到 Changeset（`WithChangeset` / `NewChangesetExecutor`）
+- ✅ Adapter 能力路由与运行时检查收敛
+- ✅ `GetGormDB` 兼容保留但固定返回 `nil`，不再暴露 ORM
+- ✅ Query Constructor v2 成为推荐入口，v1 保留兼容
+- ✅ 发布门（Release Gate）完整通过（含可选 DB 套件）
+
+---
 
 ### v0.4.2 - SQL Server Adapter (2026-02-03)
 
