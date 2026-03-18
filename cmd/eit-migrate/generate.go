@@ -35,7 +35,7 @@ func generateCmd() *cobra.Command {
 func generateMigration(migrationDir, name, migrationType string) error {
 	// 检查 migrations 目录是否存在
 	if _, err := os.Stat(migrationDir); os.IsNotExist(err) {
-		return fmt.Errorf("migrations directory not found. Run 'eit-migrate init' first")
+		return fmt.Errorf("migrations directory not found. Run 'eit-db-cli init' first")
 	}
 
 	// 生成版本号（时间戳）

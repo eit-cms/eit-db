@@ -13,13 +13,15 @@ var (
 
 func main() {
 	var rootCmd = &cobra.Command{
-		Use:   "eit-migrate",
-		Short: "EIT Database Migration Tool",
-		Long:  `A flexible migration tool for eit-db that supports both schema-based and raw SQL migrations.`,
+		Use:     "eit-db-cli",
+		Aliases: []string{"eit-migrate"},
+		Short:   "EIT Database CLI",
+		Long:    `A unified CLI for eit-db, including migration workflows and adapter scaffolding.`,
 	}
 
 	rootCmd.AddCommand(initCmd())
 	rootCmd.AddCommand(generateCmd())
+	rootCmd.AddCommand(adapterCmd())
 	rootCmd.AddCommand(upCmd())
 	rootCmd.AddCommand(downCmd())
 	rootCmd.AddCommand(statusCmd())
@@ -36,7 +38,7 @@ func versionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Print the version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("eit-migrate version %s\n", version)
+			fmt.Printf("eit-db-cli version %s (alias: eit-migrate)\n", version)
 		},
 	}
 }

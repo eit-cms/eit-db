@@ -1,12 +1,14 @@
 module github.com/eit-cms/eit-db
 
-go 1.23
+go 1.24.0
 
 require (
+	github.com/dgraph-io/ristretto/v2 v2.3.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/lib/pq v1.11.1
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/microsoft/go-mssqldb v1.8.2
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.3
 	github.com/spf13/cobra v1.10.2
 	go.mongodb.org/mongo-driver v1.14.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -19,6 +21,8 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/golang/snappy v0.0.1 // indirect
@@ -40,5 +44,6 @@ require (
 	github.com/youmark/pkcs8 v0.0.0-20181117223130-1be2e3e5546d // indirect
 	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/sync v0.10.0 // indirect
+	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.21.0 // indirect
 )

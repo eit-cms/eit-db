@@ -195,7 +195,7 @@ go run main.go status
 
 From the project root, run:
 ` + "```" + `bash
-eit-migrate generate create_users_table
+eit-db-cli generate create_users_table
 ` + "```" + `
 
 This will create a new migration file with timestamp prefix.
@@ -209,7 +209,7 @@ This will create a new migration file with timestamp prefix.
 	fmt.Println("\nNext steps:")
 	fmt.Println("1. Edit migrations/.env with your database credentials")
 	fmt.Println("2. Generate your first migration:")
-	fmt.Printf("   eit-migrate generate create_users_table\n")
+	fmt.Printf("   eit-db-cli generate create_users_table\n")
 	fmt.Println("3. Run migrations:")
 	fmt.Printf("   cd %s && go run main.go up\n", migrationDir)
 
