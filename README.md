@@ -8,7 +8,7 @@
 - **Changeset 执行器（推荐）** - 业务写操作默认入口，支持基于 Changeset 的事务封装
 - **Query Constructor (v2 推荐)** - 三层查询构造架构，支持 MySQL/PostgreSQL/SQLite/SQL Server 方言 (v0.4.1+)
 - **Migration 工具** - 灵活的数据库迁移工具，支持 Schema-based 和 Raw SQL 两种方式
-- **跨数据库适配器** - 支持 MySQL, PostgreSQL, SQLite, SQL Server
+- **跨数据库适配器** - 支持 MySQL, PostgreSQL, SQLite, SQL Server, MongoDB, Neo4j
 - **查询构建器 (v1 兼容层)** - 保留兼容，不再新增能力
 - **特性声明与派发** - Adapter 通过特性表声明能力，运行时按能力路由或降级
 - **无 GORM 暴露** - 对外不再暴露 GORM（内部降级可能复用 GORM，但不会暴露给用户）
@@ -1088,6 +1088,9 @@ func NewMigration_20260203160000_AddIndexes() db.MigrationInterface {
 | SQLite | sqlite | ✅ |
 | MySQL | mysql | ✅ |
 | PostgreSQL | postgres | ✅ |
+| SQL Server | sqlserver | ✅ |
+| MongoDB | mongo | ✅ |
+| Neo4j | neo4j | ✅ |
 
 ## 📖 文档
 
