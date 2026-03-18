@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -33,11 +34,12 @@ func (a *SQLiteAdapter) Connect(ctx context.Context, config *Config) error {
 		config = a.config
 	}
 
-	if config.Database == "" {
-		config.Database = "./eit.db"
-	}
+	sqliteCfg := config.ResolvedSQLiteConfig()
 
-	dsn := fmt.Sprintf("file:%s?cache=shared&mode=rwc", config.Database)
+	dsn := sqliteCfg.DSN
+	if strings.TrimSpace(dsn) == "" {
+		dsn = fmt.Sprintf("file:%s?cache=shared&mode=rwc", sqliteCfg.Path)
+	}
 
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
@@ -85,6 +87,54 @@ func (a *SQLiteAdapter) Ping(ctx context.Context) error {
 	return a.sqlDB.PingContext(ctx)
 }
 
+// InspectFullTextRuntime 检查 SQLite 是否编译启用了 FTS3/4/5。
+func (a *SQLiteAdapter) InspectFullTextRuntime(ctx context.Context) (*FullTextRuntimeCapability, error) {
+	if a.sqlDB == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	rows, err := a.sqlDB.QueryContext(ctx, "PRAGMA compile_options")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ftsOption := ""
+	for rows.Next() {
+		var opt string
+		if scanErr := rows.Scan(&opt); scanErr != nil {
+			return nil, scanErr
+		}
+		upper := strings.ToUpper(opt)
+		if strings.Contains(upper, "ENABLE_FTS5") {
+			ftsOption = "fts5"
+			break
+		}
+		if ftsOption == "" && (strings.Contains(upper, "ENABLE_FTS4") || strings.Contains(upper, "ENABLE_FTS3")) {
+			ftsOption = "fts3/4"
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	available := ftsOption != ""
+	notes := "SQLite default path uses LIKE fallback"
+	if available {
+		notes = "FTS module detected; tokenization can be leveraged by app-level routing"
+	}
+
+	return &FullTextRuntimeCapability{
+		NativeSupported:       false,
+		PluginChecked:         true,
+		PluginAvailable:       available,
+		PluginName:            ftsOption,
+		TokenizationSupported: available,
+		TokenizationMode:      "builtin_fts",
+		Notes:                 notes,
+	}, nil
+}
+
 // Query 执行查询 (返回多行)
 func (a *SQLiteAdapter) Query(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
 	return a.sqlDB.QueryContext(ctx, query, args...)
@@ -117,14 +167,15 @@ func (a *SQLiteAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, err
 	return &SQLiteTx{tx: sqlTx}, nil
 }
 
-// GetRawConn 获取底层连接 (返回 *gorm.DB)
+// GetRawConn 获取底层连接 (返回 *sql.DB)
 func (a *SQLiteAdapter) GetRawConn() interface{} {
-	return a.db
+	return a.sqlDB
 }
 
 // GetGormDB 获取GORM实例（用于直接访问GORM）
+// Deprecated: Adapter 层不再暴露 GORM 连接。
 func (a *SQLiteAdapter) GetGormDB() *gorm.DB {
-	return a.db
+	return nil
 }
 
 // RegisterScheduledTask SQLite 适配器暂不支持通过触发器方式实现定时任务
@@ -182,49 +233,68 @@ func (a *SQLiteAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 func (a *SQLiteAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	return &DatabaseFeatures{
 		// 索引和约束
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   true,
-		SupportsDeferrable:       true,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       true,
+		SupportsDeferrable:           true,
+
 		// 自定义类型
 		SupportsEnumType:      false,
 		SupportsCompositeType: false,
 		SupportsDomainType:    false,
 		SupportsUDT:           false,
-		
+
 		// 函数和过程
 		SupportsStoredProcedures: false,
-		SupportsFunctions:        true,  // ✅ 通过 Go 代码注册！
-		SupportsAggregateFuncs:   true,  // ✅ 也可以通过 Go 注册
+		SupportsFunctions:        true,           // ✅ 通过 Go 代码注册！
+		SupportsAggregateFuncs:   true,           // ✅ 也可以通过 Go 注册
 		FunctionLanguages:        []string{"go"}, // 使用 Go 语言注册
-		
+
 		// 高级查询
 		SupportsWindowFunctions: true, // 3.25+
 		SupportsCTE:             true, // 3.8+
 		SupportsRecursiveCTE:    true,
 		SupportsMaterializedCTE: false,
-		
+
 		// JSON 支持
 		HasNativeJSON:     false,
 		SupportsJSONPath:  true, // 3.38+ JSON functions
 		SupportsJSONIndex: false,
-		
+
 		// 全文搜索
 		SupportsFullTextSearch: true, // FTS5 extension
 		FullTextLanguages:      []string{"english"},
-		
+
 		// 其他特性
 		SupportsArrays:       false,
 		SupportsGenerated:    true, // 3.31+
 		SupportsReturning:    true, // 3.35+
 		SupportsUpsert:       true, // ON CONFLICT
 		SupportsListenNotify: false,
-		
+
 		// 元信息
 		DatabaseName:    "SQLite",
 		DatabaseVersion: "3.35+",
 		Description:     "Lightweight embedded database with Go function registration support",
+
+		FeatureSupport: map[string]FeatureSupport{
+			"window_functions": {Supported: true, MinVersion: "3.25.0", Notes: "SQLite 3.25+"},
+			"cte":              {Supported: true, MinVersion: "3.8.4", Notes: "SQLite 3.8.4+"},
+			"recursive_cte":    {Supported: true, MinVersion: "3.8.4", Notes: "SQLite 3.8.4+"},
+			"returning":        {Supported: true, MinVersion: "3.35.0", Notes: "SQLite 3.35+"},
+			"generated":        {Supported: true, MinVersion: "3.31.0", Notes: "generated columns"},
+			"json_path":        {Supported: true, MinVersion: "3.9.0", Notes: "JSON1 extension"},
+		},
+		FallbackStrategies: map[string]FeatureFallback{
+			"window_functions": FallbackApplicationLayer,
+			"cte":              FallbackApplicationLayer,
+			"recursive_cte":    FallbackApplicationLayer,
+			"returning":        FallbackApplicationLayer,
+			"generated":        FallbackApplicationLayer,
+			"json_path":        FallbackApplicationLayer,
+		},
 	}
 }
 

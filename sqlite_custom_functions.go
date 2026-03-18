@@ -2,29 +2,32 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	
+	"strconv"
+	"strings"
+
 	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 // SQLiteCustomFunction 自定义函数定义
 type SQLiteCustomFunction struct {
-	Name      string                                    // 函数名称
-	NumArgs   int                                       // 参数数量 (-1 表示可变参数)
-	Pure      bool                                      // 是否为纯函数（无副作用）
-	Impl      func(args ...interface{}) (interface{}, error) // 函数实现
+	Name    string                                         // 函数名称
+	NumArgs int                                            // 参数数量 (-1 表示可变参数)
+	Pure    bool                                           // 是否为纯函数（无副作用）
+	Impl    func(args ...interface{}) (interface{}, error) // 函数实现
 }
 
 // RegisterSQLiteFunction 注册 SQLite 自定义函数
 // 这允许在 SQLite 中使用 Go 编写的函数，性能优于应用层处理
-// 
+//
 // 注意：此功能需要在连接时通过 sql.OpenDB 使用自定义连接器
 // 由于 GORM 的封装，当前实现有限制，建议直接使用 sql.DB
 func (a *SQLiteAdapter) RegisterSQLiteFunction(fn *SQLiteCustomFunction) error {
 	// 由于 GORM 的封装，我们无法直接访问 sqlite3.SQLiteConn
 	// 需要在连接创建时注册函数
 	// 这是一个设计限制，需要在初始化时注册所有函数
-	
+
 	return fmt.Errorf("custom functions must be registered via sql.RegisterDriver before connection")
 }
 
@@ -35,10 +38,10 @@ func (a *SQLiteAdapter) RegisterCommonSQLiteFunctions() error {
 
 // SQLiteAggregateFunction 自定义聚合函数定义
 type SQLiteAggregateFunction struct {
-	Name      string
-	NumArgs   int
-	Step      func(ctx interface{}, args ...interface{}) (interface{}, error) // 每行调用
-	Final     func(ctx interface{}) (interface{}, error)                      // 最终结果
+	Name    string
+	NumArgs int
+	Step    func(ctx interface{}, args ...interface{}) (interface{}, error) // 每行调用
+	Final   func(ctx interface{}) (interface{}, error)                      // 最终结果
 }
 
 // RegisterSQLiteAggregateFunction 注册自定义聚合函数
@@ -102,6 +105,103 @@ func RegisterCustomSQLiteDriver(driverName string, functions map[string]interfac
 			},
 		})
 	return nil
+}
+
+// DefaultSQLiteJSONFallbackFunctions 返回 SQLite JSON 降级函数集合。
+// 当目标环境未启用 JSON1 扩展时，可使用这些函数作为兼容方案。
+func DefaultSQLiteJSONFallbackFunctions() map[string]interface{} {
+	return map[string]interface{}{
+		"JSON_EXTRACT_GO": JSONExtractGo,
+	}
+}
+
+// RegisterSQLiteJSONFallbackDriver 注册带 JSON 降级函数的 SQLite 驱动。
+func RegisterSQLiteJSONFallbackDriver(driverName string, extraFunctions map[string]interface{}) error {
+	functions := DefaultSQLiteJSONFallbackFunctions()
+	for name, fn := range extraFunctions {
+		functions[name] = fn
+	}
+
+	return RegisterCustomSQLiteDriver(driverName, functions)
+}
+
+// JSONExtractGo 是一个轻量 JSON 路径提取函数。
+// 支持路径格式：$.a.b、$.arr[0].name。
+func JSONExtractGo(jsonText string, path string) interface{} {
+	var data interface{}
+	if err := json.Unmarshal([]byte(jsonText), &data); err != nil {
+		return nil
+	}
+
+	value, ok := extractJSONPathValue(data, path)
+	if !ok {
+		return nil
+	}
+
+	return value
+}
+
+func extractJSONPathValue(data interface{}, path string) (interface{}, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "$" {
+		return data, true
+	}
+	if !strings.HasPrefix(path, "$.") {
+		return nil, false
+	}
+
+	segments := strings.Split(path[2:], ".")
+	current := data
+
+	for _, seg := range segments {
+		if seg == "" {
+			return nil, false
+		}
+
+		name, index, hasIndex, ok := parseJSONPathSegment(seg)
+		if !ok {
+			return nil, false
+		}
+
+		obj, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+
+		current, ok = obj[name]
+		if !ok {
+			return nil, false
+		}
+
+		if hasIndex {
+			arr, ok := current.([]interface{})
+			if !ok || index < 0 || index >= len(arr) {
+				return nil, false
+			}
+			current = arr[index]
+		}
+	}
+
+	return current, true
+}
+
+func parseJSONPathSegment(seg string) (name string, index int, hasIndex bool, ok bool) {
+	left := strings.Index(seg, "[")
+	right := strings.Index(seg, "]")
+	if left == -1 && right == -1 {
+		return seg, 0, false, true
+	}
+
+	if left <= 0 || right <= left+1 || right != len(seg)-1 {
+		return "", 0, false, false
+	}
+
+	idx, err := strconv.Atoi(seg[left+1 : right])
+	if err != nil {
+		return "", 0, false, false
+	}
+
+	return seg[:left], idx, true, true
 }
 
 // 使用示例：

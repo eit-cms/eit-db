@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -40,39 +41,45 @@ func (a *SQLServerAdapter) Connect(ctx context.Context, config *Config) error {
 	if config == nil {
 		config = a.config
 	}
+	resolved := config.ResolvedSQLServerConfig()
 
 	// 验证必需字段
-	if config.Host == "" {
-		config.Host = "localhost"
+	if resolved.Host == "" {
+		resolved.Host = "localhost"
 	}
-	if config.Port == 0 {
-		config.Port = 1433 // SQL Server 默认端口
+	if resolved.Port == 0 {
+		resolved.Port = 1433 // SQL Server 默认端口
 	}
-	if config.Username == "" {
+	if resolved.Username == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("SQL Server: username is required")
 	}
-	if config.Database == "" {
+	if resolved.Database == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("SQL Server: database name is required")
 	}
 
 	// 处理空密码
-	password := config.Password
+	password := resolved.Password
 
 	// 构建 DSN (Data Source Name)
 	// 格式: sqlserver://username:password@host:port?database=dbname
-	dsn := fmt.Sprintf(
-		"sqlserver://%s:%s@%s:%d?database=%s&connection+timeout=30&encrypt=disable",
-		config.Username,
-		password,
-		config.Host,
-		config.Port,
-		config.Database,
-	)
+	var dsn string
+	if strings.TrimSpace(resolved.DSN) != "" {
+		dsn = resolved.DSN
+	} else {
+		dsn = fmt.Sprintf(
+			"sqlserver://%s:%s@%s:%d?database=%s&connection+timeout=30&encrypt=disable",
+			resolved.Username,
+			password,
+			resolved.Host,
+			resolved.Port,
+			resolved.Database,
+		)
+	}
 
 	db, err := gorm.Open(sqlserver.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to connect to SQL Server (host=%s, port=%d, user=%s, db=%s): %w",
-			config.Host, config.Port, config.Username, config.Database, err)
+			resolved.Host, resolved.Port, resolved.Username, resolved.Database, err)
 	}
 
 	a.db = db
@@ -126,6 +133,74 @@ func (a *SQLServerAdapter) Ping(ctx context.Context) error {
 	return a.sqlDB.PingContext(ctx)
 }
 
+// InspectFullTextRuntime 检查 SQL Server Full-Text Search 是否安装。
+func (a *SQLServerAdapter) InspectFullTextRuntime(ctx context.Context) (*FullTextRuntimeCapability, error) {
+	if a.sqlDB == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	var installed sql.NullInt64
+	err := a.sqlDB.QueryRowContext(ctx, "SELECT FULLTEXTSERVICEPROPERTY('IsFullTextInstalled')").Scan(&installed)
+	if err != nil {
+		return nil, err
+	}
+
+	available := installed.Valid && installed.Int64 == 1
+	return &FullTextRuntimeCapability{
+		NativeSupported:       available,
+		PluginChecked:         true,
+		PluginAvailable:       available,
+		PluginName:            "sqlserver_full_text_service",
+		TokenizationSupported: available,
+		TokenizationMode:      "native",
+		Notes:                 "SQL Server full-text requires Full-Text service/catlog/index",
+	}, nil
+}
+
+// InspectJSONRuntime 检查 SQL Server JSON 运行时能力。
+// 说明：SQL Server 的 JSON 函数能力为内建能力（2016+），并非独立插件生态。
+func (a *SQLServerAdapter) InspectJSONRuntime(ctx context.Context) (*JSONRuntimeCapability, error) {
+	if a.sqlDB == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	var version sql.NullString
+	if err := a.sqlDB.QueryRowContext(ctx, "SELECT CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128))").Scan(&version); err != nil {
+		return nil, err
+	}
+
+	// JSON 函数能力（SQL Server 2016+）
+	hasJSONFunctions := false
+	var isJSON sql.NullInt64
+	if err := a.sqlDB.QueryRowContext(ctx, "SELECT ISJSON('{\"k\":1}')").Scan(&isJSON); err == nil {
+		hasJSONFunctions = isJSON.Valid && isJSON.Int64 == 1
+	}
+
+	// 原生 JSON 类型（SQL Server 2025 预览及后续版本）
+	hasNativeJSONType := false
+	var jsonTypeID sql.NullInt64
+	if err := a.sqlDB.QueryRowContext(ctx, "SELECT TYPE_ID('json')").Scan(&jsonTypeID); err == nil {
+		hasNativeJSONType = jsonTypeID.Valid
+	}
+
+	notes := "SQL Server JSON is built-in (2016+); no separate JSON plugin installer is required"
+	if !hasJSONFunctions {
+		notes = "JSON functions not detected; ensure SQL Server 2016+ engine/version compatibility"
+	} else if !hasNativeJSONType {
+		notes = "JSON functions are available; native json data type requires SQL Server 2025+ preview/newer"
+	}
+
+	return &JSONRuntimeCapability{
+		NativeSupported:         hasJSONFunctions,
+		NativeJSONTypeSupported: hasNativeJSONType,
+		Version:                 strings.TrimSpace(version.String),
+		PluginChecked:           true,
+		PluginAvailable:         false,
+		PluginName:              "not_applicable",
+		Notes:                   notes,
+	}, nil
+}
+
 // Query 执行查询 (返回多行)
 func (a *SQLServerAdapter) Query(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
 	return a.sqlDB.QueryContext(ctx, query, args...)
@@ -158,14 +233,15 @@ func (a *SQLServerAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, 
 	return &SQLServerTx{tx: sqlTx}, nil
 }
 
-// GetRawConn 获取底层连接 (返回 *gorm.DB)
+// GetRawConn 获取底层连接 (返回 *sql.DB)
 func (a *SQLServerAdapter) GetRawConn() interface{} {
-	return a.db
+	return a.sqlDB
 }
 
 // GetGormDB 获取GORM实例（用于直接访问GORM）
+// Deprecated: Adapter 层不再暴露 GORM 连接。
 func (a *SQLServerAdapter) GetGormDB() *gorm.DB {
-	return a.db
+	return nil
 }
 
 // RegisterScheduledTask SQL Server 适配器支持 SQL Server Agent 方式的定时任务
@@ -224,45 +300,47 @@ func (a *SQLServerAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 func (a *SQLServerAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	return &DatabaseFeatures{
 		// 索引和约束
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   true, // Filtered indexes
-		SupportsDeferrable:       false,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       true, // Filtered indexes
+		SupportsDeferrable:           false,
+
 		// 自定义类型
 		SupportsEnumType:      false,
 		SupportsCompositeType: false,
 		SupportsDomainType:    false,
 		SupportsUDT:           true,
-		
+
 		// 函数和过程
 		SupportsStoredProcedures: true,
 		SupportsFunctions:        true,
 		SupportsAggregateFuncs:   true,
 		FunctionLanguages:        []string{"tsql", "clr"},
-		
+
 		// 高级查询
 		SupportsWindowFunctions: true,
 		SupportsCTE:             true,
 		SupportsRecursiveCTE:    true,
 		SupportsMaterializedCTE: false,
-		
+
 		// JSON 支持
 		HasNativeJSON:     false, // Stored as NVARCHAR
 		SupportsJSONPath:  true,  // JSON functions since 2016
 		SupportsJSONIndex: true,  // Via computed columns
-		
+
 		// 全文搜索
 		SupportsFullTextSearch: true,
 		FullTextLanguages:      []string{"english", "chinese", "japanese"},
-		
+
 		// 其他特性
 		SupportsArrays:       false,
-		SupportsGenerated:    true, // Computed columns
-		SupportsReturning:    true, // OUTPUT clause
-		SupportsUpsert:       true, // MERGE
+		SupportsGenerated:    true,  // Computed columns
+		SupportsReturning:    true,  // OUTPUT clause
+		SupportsUpsert:       true,  // MERGE
 		SupportsListenNotify: false, // Use Service Broker instead
-		
+
 		// 元信息
 		DatabaseName:    "SQL Server",
 		DatabaseVersion: "2016+",

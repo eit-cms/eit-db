@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -40,57 +41,60 @@ func (a *PostgreSQLAdapter) Connect(ctx context.Context, config *Config) error {
 	if config == nil {
 		config = a.config
 	}
+	resolved := config.ResolvedPostgresConfig()
 
 	// 验证必需字段
-	if config.Host == "" {
-		config.Host = "localhost"
+	if resolved.Host == "" {
+		resolved.Host = "localhost"
 	}
-	if config.Port == 0 {
-		config.Port = 5432
+	if resolved.Port == 0 {
+		resolved.Port = 5432
 	}
-	if config.Username == "" {
+	if resolved.Username == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("PostgreSQL: username is required")
 	}
-	if config.Database == "" {
+	if resolved.Database == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("PostgreSQL: database name is required")
 	}
-	if config.SSLMode == "" {
-		config.SSLMode = "disable"
+	if resolved.SSLMode == "" {
+		resolved.SSLMode = "disable"
 	}
 
 	// 处理空密码（支持trust和ident认证）
-	password := config.Password
+	password := resolved.Password
 
 	// 构建 DSN (Data Source Name)
 	// lib/pq 格式: postgres://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
 	// 或使用键值格式: host=localhost port=5432 user=postgres password=secret dbname=mydb
 	var dsn string
-	if password != "" {
+	if strings.TrimSpace(resolved.DSN) != "" {
+		dsn = resolved.DSN
+	} else if password != "" {
 		dsn = fmt.Sprintf(
 			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-			config.Host,
-			config.Port,
-			config.Username,
+			resolved.Host,
+			resolved.Port,
+			resolved.Username,
 			password,
-			config.Database,
-			config.SSLMode,
+			resolved.Database,
+			resolved.SSLMode,
 		)
 	} else {
 		// 处理无密码的情况（信任认证）
 		dsn = fmt.Sprintf(
 			"host=%s port=%d user=%s dbname=%s sslmode=%s",
-			config.Host,
-			config.Port,
-			config.Username,
-			config.Database,
-			config.SSLMode,
+			resolved.Host,
+			resolved.Port,
+			resolved.Username,
+			resolved.Database,
+			resolved.SSLMode,
 		)
 	}
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to connect to PostgreSQL (host=%s, port=%d, user=%s, db=%s, ssl=%s): %w",
-			config.Host, config.Port, config.Username, config.Database, config.SSLMode, err)
+			resolved.Host, resolved.Port, resolved.Username, resolved.Database, resolved.SSLMode, err)
 	}
 
 	a.db = db
@@ -144,6 +148,139 @@ func (a *PostgreSQLAdapter) Ping(ctx context.Context) error {
 	return a.sqlDB.PingContext(ctx)
 }
 
+// InspectFullTextRuntime 检查 PostgreSQL 全文能力与常见分词插件（zhparser/pg_jieba/pgroonga）。
+// 约定：当调用方要求插件分词加速时，若插件不存在可据此降级。
+func (a *PostgreSQLAdapter) InspectFullTextRuntime(ctx context.Context) (*FullTextRuntimeCapability, error) {
+	if a.sqlDB == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	rows, err := a.sqlDB.QueryContext(ctx, `
+		SELECT extname
+		FROM pg_extension
+		WHERE extname IN ('zhparser', 'pg_jieba', 'pgroonga')
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	plugins := make([]string, 0)
+	for rows.Next() {
+		var ext string
+		if scanErr := rows.Scan(&ext); scanErr != nil {
+			return nil, scanErr
+		}
+		plugins = append(plugins, ext)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	cap := &FullTextRuntimeCapability{
+		NativeSupported:       true,
+		PluginChecked:         true,
+		PluginAvailable:       len(plugins) > 0,
+		TokenizationSupported: true,
+		TokenizationMode:      "plugin",
+		Notes:                 "PostgreSQL built-in tsvector is available; plugin can accelerate tokenizer scenarios",
+	}
+	if len(plugins) > 0 {
+		cap.PluginName = strings.Join(plugins, ",")
+	}
+
+	return cap, nil
+}
+
+// PostgresJSONType 返回 PostgreSQL 的 JSON 字段映射类型。
+// 默认使用 jsonb；可通过 config.Options["postgres_json_type"] 或 config.Options["json_type"] 配置为 json。
+func (a *PostgreSQLAdapter) PostgresJSONType() string {
+	if a == nil || a.config == nil || a.config.Options == nil {
+		return "JSONB"
+	}
+
+	if v, ok := a.config.Options["postgres_json_type"]; ok {
+		if resolved := normalizePostgresJSONType(v); resolved != "" {
+			return resolved
+		}
+	}
+
+	if v, ok := a.config.Options["json_type"]; ok {
+		if resolved := normalizePostgresJSONType(v); resolved != "" {
+			return resolved
+		}
+	}
+
+	return "JSONB"
+}
+
+// InspectJSONRuntime 检查 PostgreSQL JSON 能力（json/jsonb 类型可用性）。
+func (a *PostgreSQLAdapter) InspectJSONRuntime(ctx context.Context) (*JSONRuntimeCapability, error) {
+	if a.sqlDB == nil {
+		return nil, fmt.Errorf("database not connected")
+	}
+
+	var version string
+	if err := a.sqlDB.QueryRowContext(ctx, "SHOW server_version").Scan(&version); err != nil {
+		return nil, err
+	}
+
+	rows, err := a.sqlDB.QueryContext(ctx, "SELECT typname FROM pg_type WHERE typname IN ('json','jsonb')")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	hasJSON := false
+	hasJSONB := false
+	for rows.Next() {
+		var typ string
+		if scanErr := rows.Scan(&typ); scanErr != nil {
+			return nil, scanErr
+		}
+		switch strings.ToLower(strings.TrimSpace(typ)) {
+		case "json":
+			hasJSON = true
+		case "jsonb":
+			hasJSONB = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	notes := "PostgreSQL JSON is built-in; jsonb is recommended for indexing and operator richness"
+	if !hasJSONB {
+		notes = "PostgreSQL json type found but jsonb unavailable; verify server compatibility"
+	}
+
+	return &JSONRuntimeCapability{
+		NativeSupported:         hasJSON || hasJSONB,
+		NativeJSONTypeSupported: hasJSONB,
+		Version:                 version,
+		PluginChecked:           false,
+		PluginAvailable:         false,
+		PluginName:              "",
+		Notes:                   notes,
+	}, nil
+}
+
+func normalizePostgresJSONType(value interface{}) string {
+	raw, ok := value.(string)
+	if !ok {
+		return ""
+	}
+
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "json":
+		return "JSON"
+	case "jsonb":
+		return "JSONB"
+	default:
+		return ""
+	}
+}
+
 // Query 执行查询 (返回多行)
 func (a *PostgreSQLAdapter) Query(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
 	return a.sqlDB.QueryContext(ctx, query, args...)
@@ -176,14 +313,15 @@ func (a *PostgreSQLAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx,
 	return &PostgreSQLTx{tx: sqlTx}, nil
 }
 
-// GetRawConn 获取底层连接 (返回 *gorm.DB)
+// GetRawConn 获取底层连接 (返回 *sql.DB)
 func (a *PostgreSQLAdapter) GetRawConn() interface{} {
-	return a.db
+	return a.sqlDB
 }
 
 // GetGormDB 获取GORM实例（用于直接访问GORM）
+// Deprecated: Adapter 层不再暴露 GORM 连接。
 func (a *PostgreSQLAdapter) GetGormDB() *gorm.DB {
-	return a.db
+	return nil
 }
 
 // RegisterScheduledTask 在 PostgreSQL 中注册定时任务
@@ -335,45 +473,47 @@ func (a *PostgreSQLAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 func (a *PostgreSQLAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	return &DatabaseFeatures{
 		// 索引和约束
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   true,
-		SupportsDeferrable:       true,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       true,
+		SupportsDeferrable:           true,
+
 		// 自定义类型
 		SupportsEnumType:      true,
 		SupportsCompositeType: true,
 		SupportsDomainType:    true,
 		SupportsUDT:           true,
-		
+
 		// 函数和过程
 		SupportsStoredProcedures: true,
 		SupportsFunctions:        true,
 		SupportsAggregateFuncs:   true,
 		FunctionLanguages:        []string{"plpgsql", "sql", "python", "perl"},
-		
+
 		// 高级查询
 		SupportsWindowFunctions: true,
 		SupportsCTE:             true,
 		SupportsRecursiveCTE:    true,
 		SupportsMaterializedCTE: true,
-		
+
 		// JSON 支持
 		HasNativeJSON:     true,
 		SupportsJSONPath:  true,
 		SupportsJSONIndex: true,
-		
+
 		// 全文搜索
 		SupportsFullTextSearch: true,
 		FullTextLanguages:      []string{"english", "chinese", "japanese"},
-		
+
 		// 其他特性
 		SupportsArrays:       true,
 		SupportsGenerated:    true,
 		SupportsReturning:    true,
 		SupportsUpsert:       true,
 		SupportsListenNotify: true,
-		
+
 		// 元信息
 		DatabaseName:    "PostgreSQL",
 		DatabaseVersion: "12+",

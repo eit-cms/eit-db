@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 
 	"gorm.io/gorm"
@@ -12,10 +11,10 @@ import (
 // MySQLDynamicTableHook MySQL 动态表钩子实现
 // 使用 GORM 的 hook 机制实现基于触发的动态建表
 type MySQLDynamicTableHook struct {
-	adapter         *MySQLAdapter
-	registry        *DynamicTableRegistry
-	hookRegistered  map[string]bool
-	mu              sync.RWMutex
+	adapter        *MySQLAdapter
+	registry       *DynamicTableRegistry
+	hookRegistered map[string]bool
+	mu             sync.RWMutex
 }
 
 // NewMySQLDynamicTableHook 创建 MySQL 动态表钩子
@@ -241,41 +240,12 @@ func (h *MySQLDynamicTableHook) extractParamsFromRecord(record interface{}, conf
 
 // createTable 创建动态表
 func (h *MySQLDynamicTableHook) createTable(ctx context.Context, config *DynamicTableConfig, tableName string) error {
-	var sql strings.Builder
-	sql.WriteString("CREATE TABLE IF NOT EXISTS ")
-	sql.WriteString(h.quoteIdentifier(tableName))
-	sql.WriteString(" (")
+	repo := &Repository{adapter: h.adapter}
+	schema := config.toSchema(tableName)
+	createSQL := buildCreateTableSQL(repo, schema)
+	createSQL += " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
 
-	for i, field := range config.Fields {
-		if i > 0 {
-			sql.WriteString(", ")
-		}
-
-		sql.WriteString(h.quoteIdentifier(field.Name))
-		sql.WriteString(" ")
-		sql.WriteString(h.mapFieldType(field.Type))
-
-		if field.Autoinc && field.Primary {
-			sql.WriteString(" AUTO_INCREMENT")
-		}
-		if field.Primary {
-			sql.WriteString(" PRIMARY KEY")
-		}
-		if !field.Null {
-			sql.WriteString(" NOT NULL")
-		}
-		if field.Default != nil {
-			sql.WriteString(" DEFAULT ")
-			sql.WriteString(fmt.Sprint(field.Default))
-		}
-		if field.Unique {
-			sql.WriteString(" UNIQUE")
-		}
-	}
-
-	sql.WriteString(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")
-
-	return h.executeSQL(ctx, sql.String())
+	return h.executeSQL(ctx, createSQL)
 }
 
 // tableExists 检查表是否存在
@@ -303,37 +273,6 @@ func (h *MySQLDynamicTableHook) generateTableName(config *DynamicTableConfig, pa
 		return fmt.Sprintf("%s_%v", config.TableName, id)
 	}
 	return config.TableName
-}
-
-// quoteIdentifier 引用标识符
-func (h *MySQLDynamicTableHook) quoteIdentifier(name string) string {
-	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
-}
-
-// mapFieldType 将字段类型映射到 MySQL 类型
-func (h *MySQLDynamicTableHook) mapFieldType(fieldType FieldType) string {
-	switch fieldType {
-	case TypeString:
-		return "VARCHAR(255)"
-	case TypeInteger:
-		return "INT"
-	case TypeFloat:
-		return "FLOAT"
-	case TypeBoolean:
-		return "TINYINT(1)"
-	case TypeTime:
-		return "DATETIME"
-	case TypeBinary:
-		return "LONGBLOB"
-	case TypeDecimal:
-		return "DECIMAL(18,2)"
-	case TypeJSON:
-		return "JSON"
-	case TypeArray:
-		return "TEXT"
-	default:
-		return "TEXT"
-	}
 }
 
 // executeSQL 执行 SQL

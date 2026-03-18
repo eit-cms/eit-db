@@ -3,9 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -25,10 +28,10 @@ func NewMongoAdapter(config *Config) (*MongoAdapter, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	uri, _ := config.Options["uri"].(string)
+	resolved := config.ResolvedMongoConfig()
 	return &MongoAdapter{
-		database: config.Database,
-		uri:      uri,
+		database: resolved.Database,
+		uri:      resolved.URI,
 	}, nil
 }
 
@@ -43,10 +46,9 @@ func (a *MongoAdapter) Connect(ctx context.Context, config *Config) error {
 		if err := config.Validate(); err != nil {
 			return err
 		}
-		uri, _ = config.Options["uri"].(string)
-		if config.Database != "" {
-			a.database = config.Database
-		}
+		resolved := config.ResolvedMongoConfig()
+		uri = resolved.URI
+		a.database = resolved.Database
 	}
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
@@ -124,9 +126,212 @@ func (a *MongoAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTask
 	return nil, fmt.Errorf("mongodb: scheduled task not supported")
 }
 
-// GetQueryBuilderProvider MongoDB 不提供 SQL Query Builder
+// GetQueryBuilderProvider 返回 MongoDB BSON Query Builder Provider。
 func (a *MongoAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
-	return nil
+	return NewMongoQueryConstructorProvider()
+}
+
+// ExecuteCompiledFindPlan 执行由 MongoQueryConstructor 生成的 Find 计划。
+func (a *MongoAdapter) ExecuteCompiledFindPlan(ctx context.Context, query string) ([]map[string]interface{}, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("mongodb client not connected")
+	}
+	if !strings.HasPrefix(query, mongoCompiledQueryPrefix) {
+		return nil, fmt.Errorf("invalid mongodb compiled query prefix")
+	}
+
+	payload := strings.TrimPrefix(query, mongoCompiledQueryPrefix)
+	var plan MongoCompiledFindPlan
+	if err := json.Unmarshal([]byte(payload), &plan); err != nil {
+		return nil, fmt.Errorf("failed to parse mongodb compiled query: %w", err)
+	}
+
+	collection := strings.TrimSpace(plan.Collection)
+	if collection == "" {
+		return nil, fmt.Errorf("mongodb compiled query requires collection")
+	}
+
+	coll := a.client.Database(a.database).Collection(collection)
+	findOpts := options.Find()
+	if len(plan.Projection) > 0 {
+		projection := bson.M{}
+		for _, field := range plan.Projection {
+			trimmed := strings.TrimSpace(field)
+			if trimmed == "" {
+				continue
+			}
+			projection[trimmed] = 1
+		}
+		if len(projection) > 0 {
+			findOpts.SetProjection(projection)
+		}
+	}
+	if len(plan.Sort) > 0 {
+		sortSpec := bson.D{}
+		for _, item := range plan.Sort {
+			field := strings.TrimSpace(item.Field)
+			if field == "" {
+				continue
+			}
+			direction := 1
+			if item.Direction < 0 {
+				direction = -1
+			}
+			sortSpec = append(sortSpec, bson.E{Key: field, Value: direction})
+		}
+		if len(sortSpec) > 0 {
+			findOpts.SetSort(sortSpec)
+		}
+	}
+	if plan.Limit != nil {
+		findOpts.SetLimit(int64(*plan.Limit))
+	}
+	if plan.Offset != nil {
+		findOpts.SetSkip(int64(*plan.Offset))
+	}
+
+	filter := bson.M{}
+	if plan.Filter != nil {
+		filter = plan.Filter
+	}
+
+	cursor, err := coll.Find(ctx, filter, findOpts)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	rows := make([]map[string]interface{}, 0)
+	for cursor.Next(ctx) {
+		entry := map[string]interface{}{}
+		if err := cursor.Decode(&entry); err != nil {
+			return nil, err
+		}
+		rows = append(rows, entry)
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+
+	return rows, nil
+}
+
+// ExecuteCompiledWritePlan 执行由 MongoQueryConstructor 生成的写入计划。
+func (a *MongoAdapter) ExecuteCompiledWritePlan(ctx context.Context, query string) (*QueryConstructorExecSummary, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("mongodb client not connected")
+	}
+	if !strings.HasPrefix(query, mongoCompiledWritePrefix) {
+		return nil, fmt.Errorf("invalid mongodb compiled write prefix")
+	}
+
+	payload := strings.TrimPrefix(query, mongoCompiledWritePrefix)
+	var plan MongoCompiledWritePlan
+	if err := json.Unmarshal([]byte(payload), &plan); err != nil {
+		return nil, fmt.Errorf("failed to parse mongodb compiled write: %w", err)
+	}
+
+	collection := strings.TrimSpace(plan.Collection)
+	if collection == "" {
+		return nil, fmt.Errorf("mongodb compiled write requires collection")
+	}
+	coll := a.client.Database(a.database).Collection(collection)
+
+	summary := &QueryConstructorExecSummary{Counters: map[string]int{}}
+	if plan.ReturnWriteDetail || plan.ReturnInsertedID {
+		summary.Details = map[string]interface{}{}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(plan.Operation)) {
+	case "insert_one":
+		if len(plan.Document) == 0 {
+			return nil, fmt.Errorf("mongodb insert_one requires document")
+		}
+		res, err := coll.InsertOne(ctx, plan.Document)
+		if err != nil {
+			return nil, err
+		}
+		summary.RowsAffected = 1
+		summary.Counters["inserted"] = 1
+		if res != nil && res.InsertedID != nil {
+			summary.Counters["inserted_id_present"] = 1
+			if plan.ReturnInsertedID && summary.Details != nil {
+				summary.Details["inserted_id"] = res.InsertedID
+			}
+		}
+		if plan.ReturnWriteDetail && summary.Details != nil {
+			summary.Details["inserted"] = 1
+		}
+		return summary, nil
+	case "insert_many":
+		if len(plan.Documents) == 0 {
+			return nil, fmt.Errorf("mongodb insert_many requires documents")
+		}
+		docs := make([]interface{}, 0, len(plan.Documents))
+		for _, d := range plan.Documents {
+			docs = append(docs, d)
+		}
+		res, err := coll.InsertMany(ctx, docs)
+		if err != nil {
+			return nil, err
+		}
+		summary.RowsAffected = int64(len(plan.Documents))
+		summary.Counters["inserted"] = len(plan.Documents)
+		if res != nil {
+			summary.Counters["inserted_ids"] = len(res.InsertedIDs)
+			if plan.ReturnInsertedID && summary.Details != nil {
+				summary.Details["inserted_ids"] = res.InsertedIDs
+			}
+			if plan.ReturnWriteDetail && summary.Details != nil {
+				summary.Details["inserted_count"] = len(res.InsertedIDs)
+			}
+		}
+		return summary, nil
+	case "update_many":
+		if len(plan.Update) == 0 {
+			return nil, fmt.Errorf("mongodb update_many requires update document")
+		}
+		filter := bson.M{}
+		if plan.Filter != nil {
+			filter = plan.Filter
+		}
+		res, err := coll.UpdateMany(ctx, filter, plan.Update, options.Update().SetUpsert(plan.Upsert))
+		if err != nil {
+			return nil, err
+		}
+		if res != nil {
+			summary.RowsAffected = int64(res.ModifiedCount)
+			summary.Counters["matched"] = int(res.MatchedCount)
+			summary.Counters["modified"] = int(res.ModifiedCount)
+			summary.Counters["upserted"] = int(res.UpsertedCount)
+			if plan.ReturnWriteDetail && summary.Details != nil {
+				summary.Details["matched_count"] = res.MatchedCount
+				summary.Details["modified_count"] = res.ModifiedCount
+				summary.Details["upserted_count"] = res.UpsertedCount
+				summary.Details["upserted_id"] = res.UpsertedID
+			}
+		}
+		return summary, nil
+	case "delete_many":
+		filter := bson.M{}
+		if plan.Filter != nil {
+			filter = plan.Filter
+		}
+		res, err := coll.DeleteMany(ctx, filter)
+		if err != nil {
+			return nil, err
+		}
+		if res != nil {
+			summary.RowsAffected = int64(res.DeletedCount)
+			summary.Counters["deleted"] = int(res.DeletedCount)
+			if plan.ReturnWriteDetail && summary.Details != nil {
+				summary.Details["deleted_count"] = res.DeletedCount
+			}
+		}
+		return summary, nil
+	default:
+		return nil, fmt.Errorf("mongodb compiled write operation not supported: %s", plan.Operation)
+	}
 }
 
 // GetDatabaseFeatures MongoDB 特性声明（最小实现）
@@ -137,6 +342,137 @@ func (a *MongoAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 // GetQueryFeatures MongoDB 查询特性声明（最小实现）
 func (a *MongoAdapter) GetQueryFeatures() *QueryFeatures {
 	return NewMongoQueryFeatures()
+}
+
+// InspectFullTextRuntime MongoDB 运行时全文能力说明。
+// 这里不依赖插件检测，默认给出应用层分词可用的能力声明。
+func (a *MongoAdapter) InspectFullTextRuntime(ctx context.Context) (*FullTextRuntimeCapability, error) {
+	return &FullTextRuntimeCapability{
+		NativeSupported:       true,
+		PluginChecked:         false,
+		PluginAvailable:       false,
+		PluginName:            "",
+		TokenizationSupported: true,
+		TokenizationMode:      "application",
+		Notes:                 "MongoDB can use text index; app-layer tokenization is supported for fallback/boost",
+	}, nil
+}
+
+// HasCustomFeatureImplementation 声明 MongoDB 可用的自定义能力
+func (a *MongoAdapter) HasCustomFeatureImplementation(feature string) bool {
+	switch feature {
+	case "foreign_keys", "composite_foreign_keys", "custom_joiner", "document_join", "full_text_search", "tokenized_full_text_search":
+		return true
+	default:
+		return false
+	}
+}
+
+// ExecuteCustomFeature 执行 MongoDB 的自定义能力（当前提供 document join 方案）
+func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string, input map[string]interface{}) (interface{}, error) {
+	switch feature {
+	case "foreign_keys", "composite_foreign_keys", "custom_joiner", "document_join":
+		localCollection, _ := input["local_collection"].(string)
+		foreignCollection, _ := input["foreign_collection"].(string)
+		asField, _ := input["as"].(string)
+
+		localFields, _ := input["local_fields"].([]string)
+		foreignFields, _ := input["foreign_fields"].([]string)
+
+		if localCollection == "" || foreignCollection == "" || len(localFields) == 0 || len(foreignFields) == 0 {
+			return nil, fmt.Errorf("mongodb custom_joiner requires local_collection, foreign_collection, local_fields, foreign_fields")
+		}
+
+		if len(localFields) != len(foreignFields) {
+			return nil, fmt.Errorf("mongodb custom_joiner requires same number of local_fields and foreign_fields")
+		}
+
+		if asField == "" {
+			asField = "joined_docs"
+		}
+
+		andConditions := make([]map[string]interface{}, 0, len(localFields))
+		for i := range localFields {
+			andConditions = append(andConditions, map[string]interface{}{
+				"$eq": []interface{}{"$$local_" + localFields[i], "$" + foreignFields[i]},
+			})
+		}
+
+		letVars := make(map[string]interface{}, len(localFields))
+		for _, localField := range localFields {
+			letVars["local_"+localField] = "$" + localField
+		}
+
+		pipeline := []map[string]interface{}{
+			{
+				"$lookup": map[string]interface{}{
+					"from": foreignCollection,
+					"let":  letVars,
+					"pipeline": []map[string]interface{}{
+						{
+							"$match": map[string]interface{}{
+								"$expr": map[string]interface{}{"$and": andConditions},
+							},
+						},
+					},
+					"as": asField,
+				},
+			},
+		}
+
+		return map[string]interface{}{
+			"engine":             "mongodb",
+			"strategy":           "aggregation_lookup",
+			"local_collection":   localCollection,
+			"foreign_collection": foreignCollection,
+			"pipeline":           pipeline,
+		}, nil
+	case "full_text_search", "tokenized_full_text_search":
+		collection, _ := input["collection"].(string)
+		query, _ := input["query"].(string)
+		fields, _ := input["fields"].([]string)
+		if collection == "" || strings.TrimSpace(query) == "" {
+			return nil, fmt.Errorf("mongodb text search requires collection and query")
+		}
+		if len(fields) == 0 {
+			fields = []string{"content"}
+		}
+
+		tokens := tokenizeSearchTerms(query)
+		if len(tokens) == 0 {
+			tokens = []string{query}
+		}
+
+		// 生成应用层分词增强的 $regex 查询计划（可由上层替换成 Atlas Search / $text）
+		andConditions := make([]map[string]interface{}, 0, len(tokens))
+		for _, token := range tokens {
+			orGroup := make([]map[string]interface{}, 0, len(fields))
+			for _, field := range fields {
+				orGroup = append(orGroup, map[string]interface{}{
+					field: map[string]interface{}{
+						"$regex":   token,
+						"$options": "i",
+					},
+				})
+			}
+			andConditions = append(andConditions, map[string]interface{}{"$or": orGroup})
+		}
+
+		pipeline := []map[string]interface{}{
+			{"$match": map[string]interface{}{"$and": andConditions}},
+		}
+
+		return map[string]interface{}{
+			"engine":     "mongodb",
+			"strategy":   "tokenized_regex_pipeline",
+			"collection": collection,
+			"fields":     fields,
+			"tokens":     tokens,
+			"pipeline":   pipeline,
+		}, nil
+	default:
+		return nil, fmt.Errorf("mongodb custom feature not supported: %s", feature)
+	}
 }
 
 // MongoFactory AdapterFactory 实现

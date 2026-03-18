@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -40,39 +41,45 @@ func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) error {
 	if config == nil {
 		config = a.config
 	}
+	resolved := config.ResolvedMySQLConfig()
 
 	// 验证必需字段
-	if config.Host == "" {
-		config.Host = "localhost"
+	if resolved.Host == "" {
+		resolved.Host = "localhost"
 	}
-	if config.Port == 0 {
-		config.Port = 3306
+	if resolved.Port == 0 {
+		resolved.Port = 3306
 	}
-	if config.Username == "" {
+	if resolved.Username == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("MySQL: username is required")
 	}
-	if config.Database == "" {
+	if resolved.Database == "" && strings.TrimSpace(resolved.DSN) == "" {
 		return fmt.Errorf("MySQL: database name is required")
 	}
 
 	// 处理空密码
-	password := config.Password
+	password := resolved.Password
 
 	// 构建 DSN (Data Source Name)
 	// 格式: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
-		config.Username,
-		password,
-		config.Host,
-		config.Port,
-		config.Database,
-	)
+	var dsn string
+	if strings.TrimSpace(resolved.DSN) != "" {
+		dsn = resolved.DSN
+	} else {
+		dsn = fmt.Sprintf(
+			"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
+			resolved.Username,
+			password,
+			resolved.Host,
+			resolved.Port,
+			resolved.Database,
+		)
+	}
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return fmt.Errorf("failed to connect to MySQL (host=%s, port=%d, user=%s, db=%s): %w", 
-			config.Host, config.Port, config.Username, config.Database, err)
+		return fmt.Errorf("failed to connect to MySQL (host=%s, port=%d, user=%s, db=%s): %w",
+			resolved.Host, resolved.Port, resolved.Username, resolved.Database, err)
 	}
 
 	a.db = db
@@ -158,14 +165,15 @@ func (a *MySQLAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, erro
 	return &MySQLTx{tx: sqlTx}, nil
 }
 
-// GetRawConn 获取底层连接 (返回 *gorm.DB)
+// GetRawConn 获取底层连接 (返回 *sql.DB)
 func (a *MySQLAdapter) GetRawConn() interface{} {
-	return a.db
+	return a.sqlDB
 }
 
 // GetGormDB 获取GORM实例（用于直接访问GORM）
+// Deprecated: Adapter 层不再暴露 GORM 连接。
 func (a *MySQLAdapter) GetGormDB() *gorm.DB {
-	return a.db
+	return nil
 }
 
 // RegisterScheduledTask MySQL 适配器暂不支持通过 EVENT 方式实现定时任务
@@ -223,49 +231,71 @@ func (a *MySQLAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
 func (a *MySQLAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	return &DatabaseFeatures{
 		// 索引和约束
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   false, // 8.0.13+ functional indexes only
-		SupportsDeferrable:       false,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       false, // 8.0.13+ functional indexes only
+		SupportsDeferrable:           false,
+
 		// 自定义类型
 		SupportsEnumType:      true, // Column-level ENUM
 		SupportsCompositeType: false,
 		SupportsDomainType:    false,
 		SupportsUDT:           false,
-		
+
 		// 函数和过程
 		SupportsStoredProcedures: true,
 		SupportsFunctions:        true,
 		SupportsAggregateFuncs:   false,
 		FunctionLanguages:        []string{"sql"},
-		
+
 		// 高级查询
 		SupportsWindowFunctions: true, // 8.0+
 		SupportsCTE:             true, // 8.0+
 		SupportsRecursiveCTE:    true, // 8.0+
 		SupportsMaterializedCTE: false,
-		
+
 		// JSON 支持
 		HasNativeJSON:     true, // 5.7+
 		SupportsJSONPath:  true,
 		SupportsJSONIndex: true, // 8.0+
-		
+
 		// 全文搜索
 		SupportsFullTextSearch: true,
 		FullTextLanguages:      []string{"english"},
-		
+
 		// 其他特性
 		SupportsArrays:       false,
 		SupportsGenerated:    true, // 5.7+
 		SupportsReturning:    false,
 		SupportsUpsert:       true, // ON DUPLICATE KEY UPDATE
 		SupportsListenNotify: false,
-		
+
 		// 元信息
 		DatabaseName:    "MySQL",
 		DatabaseVersion: "8.0+",
 		Description:     "Popular open-source database with good performance",
+
+		FeatureSupport: map[string]FeatureSupport{
+			"window_functions": {Supported: true, MinVersion: "8.0", Notes: "MySQL 8.0+"},
+			"cte":              {Supported: true, MinVersion: "8.0", Notes: "MySQL 8.0+"},
+			"recursive_cte":    {Supported: true, MinVersion: "8.0", Notes: "MySQL 8.0+"},
+			"native_json":      {Supported: true, MinVersion: "5.7", Notes: "MySQL 5.7+"},
+			"json_path":        {Supported: true, MinVersion: "5.7", Notes: "MySQL 5.7+"},
+			"json_index":       {Supported: true, MinVersion: "8.0.13", Notes: "functional index on JSON expression"},
+			"generated":        {Supported: true, MinVersion: "5.7", Notes: "generated columns"},
+			"full_text_search": {Supported: true, MinVersion: "5.6", Notes: "InnoDB FTS in modern versions"},
+		},
+		FallbackStrategies: map[string]FeatureFallback{
+			"window_functions": FallbackApplicationLayer,
+			"cte":              FallbackApplicationLayer,
+			"recursive_cte":    FallbackApplicationLayer,
+			"native_json":      FallbackApplicationLayer,
+			"json_path":        FallbackApplicationLayer,
+			"json_index":       FallbackApplicationLayer,
+			"generated":        FallbackApplicationLayer,
+		},
 	}
 }
 

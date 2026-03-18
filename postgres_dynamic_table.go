@@ -227,37 +227,8 @@ func (h *PostgreSQLDynamicTableHook) generatePLPgSQLFunction(config *DynamicTabl
 
 // generateCreateTableSQL 生成创建表的 SQL（用于函数中动态执行）
 func (h *PostgreSQLDynamicTableHook) generateCreateTableSQL(config *DynamicTableConfig, tableNameVar string) string {
-	var sql strings.Builder
-	sql.WriteString("CREATE TABLE ' || ")
-	sql.WriteString(tableNameVar)
-	sql.WriteString(" || ' (")
-
-	for i, field := range config.Fields {
-		if i > 0 {
-			sql.WriteString(", ")
-		}
-
-		sql.WriteString(h.quoteIdentifier(field.Name))
-		sql.WriteString(" ")
-		sql.WriteString(h.mapFieldType(field.Type))
-
-		if field.Primary {
-			sql.WriteString(" PRIMARY KEY")
-		}
-		if field.Autoinc && field.Primary {
-			sql.WriteString(" SERIAL")
-		}
-		if !field.Null {
-			sql.WriteString(" NOT NULL")
-		}
-		if field.Default != nil {
-			sql.WriteString(" DEFAULT ")
-			sql.WriteString(fmt.Sprint(field.Default))
-		}
-	}
-
-	sql.WriteString(")")
-	return sql.String()
+	columnsSQL := h.buildDynamicTableColumnsSQL(config)
+	return fmt.Sprintf("CREATE TABLE \" || %s || \" (%s)", tableNameVar, columnsSQL)
 }
 
 // buildTriggerCondition 构建触发器条件
@@ -286,41 +257,59 @@ func (h *PostgreSQLDynamicTableHook) dropFunction(ctx context.Context, functionN
 
 // createTable 创建动态表
 func (h *PostgreSQLDynamicTableHook) createTable(ctx context.Context, config *DynamicTableConfig, tableName string) error {
-	var sql strings.Builder
-	sql.WriteString("CREATE TABLE ")
-	sql.WriteString(h.quoteIdentifier(tableName))
-	sql.WriteString(" (")
+	repo := &Repository{adapter: h.adapter}
+	schema := config.toSchema(tableName)
+	createSQL := buildCreateTableSQL(repo, schema)
 
-	for i, field := range config.Fields {
-		if i > 0 {
-			sql.WriteString(", ")
-		}
+	return h.executeSQL(ctx, createSQL)
+}
 
-		sql.WriteString(h.quoteIdentifier(field.Name))
-		sql.WriteString(" ")
-		sql.WriteString(h.mapFieldType(field.Type))
+func (h *PostgreSQLDynamicTableHook) buildDynamicTableColumnsSQL(config *DynamicTableConfig) string {
+	adapter := Adapter(h.adapter)
+	dialect := NewPostgreSQLDialect()
+	schema := config.toSchema("dynamic_table_template")
 
-		if field.Autoinc {
-			sql.WriteString(" SERIAL")
-		}
-		if field.Primary {
-			sql.WriteString(" PRIMARY KEY")
-		}
-		if !field.Null {
-			sql.WriteString(" NOT NULL")
-		}
-		if field.Default != nil {
-			sql.WriteString(" DEFAULT ")
-			sql.WriteString(fmt.Sprint(field.Default))
-		}
-		if field.Unique {
-			sql.WriteString(" UNIQUE")
-		}
+	primaryFields, uniqueConstraints, fkConstraints := collectTableConstraints(adapter, schema)
+	effectiveInlinePrimary := ""
+	if len(primaryFields) == 1 {
+		effectiveInlinePrimary = primaryFields[0]
 	}
 
-	sql.WriteString(")")
+	columns := make([]string, 0, len(schema.Fields()))
+	for _, field := range schema.Fields() {
+		columns = append(columns, buildColumnDefinition(adapter, dialect, field, field.Name == effectiveInlinePrimary))
+	}
 
-	return h.executeSQL(ctx, sql.String())
+	if len(primaryFields) > 1 {
+		columns = append(columns, fmt.Sprintf("PRIMARY KEY (%s)", joinQuotedIdentifiers(dialect, primaryFields)))
+	}
+
+	for _, unique := range uniqueConstraints {
+		uniqueSQL := fmt.Sprintf("UNIQUE (%s)", joinQuotedIdentifiers(dialect, unique.Fields))
+		if unique.Name != "" {
+			uniqueSQL = fmt.Sprintf("CONSTRAINT %s %s", dialect.QuoteIdentifier(unique.Name), uniqueSQL)
+		}
+		columns = append(columns, uniqueSQL)
+	}
+
+	for _, fk := range fkConstraints {
+		localCols := joinQuotedIdentifiers(dialect, fk.Fields)
+		refTable := dialect.QuoteIdentifier(fk.RefTable)
+		refCols := joinQuotedIdentifiers(dialect, fk.RefFields)
+		fkSQL := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)", localCols, refTable, refCols)
+		if fk.OnDelete != "" {
+			fkSQL += " ON DELETE " + fk.OnDelete
+		}
+		if fk.OnUpdate != "" {
+			fkSQL += " ON UPDATE " + fk.OnUpdate
+		}
+		if fk.Name != "" {
+			fkSQL = fmt.Sprintf("CONSTRAINT %s %s", dialect.QuoteIdentifier(fk.Name), fkSQL)
+		}
+		columns = append(columns, fkSQL)
+	}
+
+	return strings.Join(columns, ", ")
 }
 
 // tableExists 检查表是否存在
@@ -369,32 +358,6 @@ func (h *PostgreSQLDynamicTableHook) quoteIdentifier(name string) string {
 // quoteStringLiteral 引用字符串字面量
 func (h *PostgreSQLDynamicTableHook) quoteStringLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
-// mapFieldType 将字段类型映射到 PostgreSQL 类型
-func (h *PostgreSQLDynamicTableHook) mapFieldType(fieldType FieldType) string {
-	switch fieldType {
-	case TypeString:
-		return "VARCHAR(255)"
-	case TypeInteger:
-		return "INTEGER"
-	case TypeFloat:
-		return "FLOAT"
-	case TypeBoolean:
-		return "BOOLEAN"
-	case TypeTime:
-		return "TIMESTAMP"
-	case TypeBinary:
-		return "BYTEA"
-	case TypeDecimal:
-		return "DECIMAL(18,2)"
-	case TypeJSON:
-		return "JSONB"
-	case TypeArray:
-		return "TEXT[]"
-	default:
-		return "TEXT"
-	}
 }
 
 // executeSQL 执行 SQL
