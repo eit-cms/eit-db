@@ -95,7 +95,7 @@ func TestDynamicTableConfigBuilder(t *testing.T) {
 	// 检查字段属性
 	emailField := config.Fields[1]
 	if emailField.Null || !emailField.Index || !emailField.Unique {
-		t.Fatalf("Email field attributes not set correctly: Null=%v, Index=%v, Unique=%v", 
+		t.Fatalf("Email field attributes not set correctly: Null=%v, Index=%v, Unique=%v",
 			emailField.Null, emailField.Index, emailField.Unique)
 	}
 }
@@ -170,6 +170,7 @@ func TestDynamicTableFieldTypes(t *testing.T) {
 		TypeDecimal,
 		TypeJSON,
 		TypeArray,
+		TypeLocation,
 	}
 
 	for _, fieldType := range fieldTypes {
@@ -255,7 +256,7 @@ func TestMultipleFields(t *testing.T) {
 	for _, field := range config.Fields {
 		if expectedType, ok := expectedFields[field.Name]; ok {
 			if field.Type != expectedType {
-				t.Fatalf("Field %s: expected type %v, got %v", 
+				t.Fatalf("Field %s: expected type %v, got %v",
 					field.Name, expectedType, field.Type)
 			}
 		}
@@ -315,7 +316,7 @@ func TestDynamicTableConfigCloning(t *testing.T) {
 func TestFieldValidation(t *testing.T) {
 	// 创建无效配置（缺少表名）应该在注册时被检查
 	config := &DynamicTableConfig{
-		TableName: "",  // 无效
+		TableName: "", // 无效
 		Fields:    make([]*DynamicTableField, 0),
 	}
 
@@ -342,4 +343,28 @@ func TestIntegrationFlow(t *testing.T) {
 	t.Log("8. Cleanup")
 
 	_ = ctx
+}
+
+func TestDynamicTableConfigToSchema(t *testing.T) {
+	config := NewDynamicTableConfig("ignored_name").
+		AddField(NewDynamicTableField("id", TypeInteger).AsPrimaryKey().WithAutoinc()).
+		AddField(NewDynamicTableField("name", TypeString).AsNotNull().WithDefault("'guest'"))
+
+	schema := config.toSchema("runtime_users_1")
+	if schema.TableName() != "runtime_users_1" {
+		t.Fatalf("expected runtime table name, got %s", schema.TableName())
+	}
+
+	fields := schema.Fields()
+	if len(fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(fields))
+	}
+
+	if fields[0].Name != "id" || !fields[0].Primary || !fields[0].Autoinc {
+		t.Fatalf("id field mapping is incorrect: %+v", fields[0])
+	}
+
+	if fields[1].Name != "name" || fields[1].Null || fields[1].Default != "'guest'" {
+		t.Fatalf("name field mapping is incorrect: %+v", fields[1])
+	}
 }

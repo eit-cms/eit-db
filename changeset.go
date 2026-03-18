@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sync"
@@ -10,22 +11,22 @@ import (
 type Changeset struct {
 	// 原始数据
 	data map[string]interface{}
-	
+
 	// 变更的数据
 	changes map[string]interface{}
-	
+
 	// 验证错误
 	errors map[string][]string
-	
+
 	// 关联的模式
 	schema Schema
-	
+
 	// 是否有效
 	valid bool
-	
+
 	// 变更前的值（用于追踪）
 	previousValues map[string]interface{}
-	
+
 	// 锁
 	mu sync.RWMutex
 }
@@ -33,12 +34,12 @@ type Changeset struct {
 // NewChangeset 创建新的 Changeset
 func NewChangeset(schema Schema) *Changeset {
 	return &Changeset{
-		data:            make(map[string]interface{}),
-		changes:         make(map[string]interface{}),
-		errors:          make(map[string][]string),
-		schema:          schema,
-		valid:           true,
-		previousValues:  make(map[string]interface{}),
+		data:           make(map[string]interface{}),
+		changes:        make(map[string]interface{}),
+		errors:         make(map[string][]string),
+		schema:         schema,
+		valid:          true,
+		previousValues: make(map[string]interface{}),
 	}
 }
 
@@ -96,8 +97,28 @@ func (cs *Changeset) Cast(data map[string]interface{}) *Changeset {
 func (cs *Changeset) Validate() *Changeset {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	return cs.validateLocked(GetValidationLocale())
+}
 
+// ValidateWithLocale 使用指定 locale 执行验证。
+func (cs *Changeset) ValidateWithLocale(locale string) *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(locale)
+}
+
+// ValidateWithContext 从上下文读取 locale 执行验证。
+func (cs *Changeset) ValidateWithContext(ctx context.Context) *Changeset {
+	return cs.ValidateWithLocale(ValidationLocaleFromContext(ctx))
+}
+
+func (cs *Changeset) validateLocked(locale string) *Changeset {
 	cs.errors = make(map[string][]string) // 清空之前的错误
+	cs.valid = true
+
+	if locale == "" {
+		locale = GetValidationLocale()
+	}
 
 	for _, field := range cs.schema.Fields() {
 		value, exists := cs.data[field.Name]
@@ -112,7 +133,14 @@ func (cs *Changeset) Validate() *Changeset {
 		// 应用验证器
 		if exists && value != nil {
 			for _, validator := range field.Validators {
-				if err := validator.Validate(value); err != nil {
+				var err error
+				if localeAware, ok := validator.(LocaleAwareValidator); ok {
+					err = localeAware.ValidateWithLocale(value, locale)
+				} else {
+					err = validator.Validate(value)
+				}
+
+				if err != nil {
 					cs.addError(field.Name, err.Error())
 					cs.valid = false
 				}
@@ -125,6 +153,11 @@ func (cs *Changeset) Validate() *Changeset {
 
 // ValidateChange 验证特定字段的变更
 func (cs *Changeset) ValidateChange(fieldName string, validator Validator) *Changeset {
+	return cs.ValidateChangeWithLocale(fieldName, validator, GetValidationLocale())
+}
+
+// ValidateChangeWithLocale 使用指定 locale 验证指定字段。
+func (cs *Changeset) ValidateChangeWithLocale(fieldName string, validator Validator, locale string) *Changeset {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -133,12 +166,28 @@ func (cs *Changeset) ValidateChange(fieldName string, validator Validator) *Chan
 		return cs
 	}
 
-	if err := validator.Validate(value); err != nil {
+	if locale == "" {
+		locale = GetValidationLocale()
+	}
+
+	var err error
+	if localeAware, ok := validator.(LocaleAwareValidator); ok {
+		err = localeAware.ValidateWithLocale(value, locale)
+	} else {
+		err = validator.Validate(value)
+	}
+
+	if err != nil {
 		cs.addError(fieldName, err.Error())
 		cs.valid = false
 	}
 
 	return cs
+}
+
+// ValidateChangeWithContext 从上下文读取 locale 验证指定字段。
+func (cs *Changeset) ValidateChangeWithContext(ctx context.Context, fieldName string, validator Validator) *Changeset {
+	return cs.ValidateChangeWithLocale(fieldName, validator, ValidationLocaleFromContext(ctx))
 }
 
 // IsValid 检查 Changeset 是否有效
@@ -166,7 +215,7 @@ func (cs *Changeset) GetError(fieldName string) []string {
 func (cs *Changeset) Data() map[string]interface{} {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	
+
 	result := make(map[string]interface{})
 	for k, v := range cs.data {
 		result[k] = v
@@ -178,7 +227,7 @@ func (cs *Changeset) Data() map[string]interface{} {
 func (cs *Changeset) Changes() map[string]interface{} {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	
+
 	result := make(map[string]interface{})
 	for k, v := range cs.changes {
 		result[k] = v

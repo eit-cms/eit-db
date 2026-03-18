@@ -7,12 +7,23 @@ import (
 
 // TestStruct 测试用的结构体
 type TestUser struct {
-	ID        int    `db:"id,primary_key,auto_increment"`
-	Username  string `db:"username,not_null,unique"`
-	Email     string `db:"email,not_null,unique"`
-	Age       *int   `db:"age"` // 指针表示可空
-	IsActive  bool   `db:"is_active,not_null"`
-	CreatedAt string `db:"created_at"`
+	ID        int    `eit_db:"id,primary_key,auto_increment"`
+	Username  string `eit_db:"username,not_null,unique"`
+	Email     string `eit_db:"email,not_null,unique"`
+	Age       *int   `eit_db:"age"` // 指针表示可空
+	IsActive  bool   `eit_db:"is_active,not_null"`
+	CreatedAt string `eit_db:"created_at"`
+}
+
+type LegacyTaggedUser struct {
+	ID   int    `db:"id,primary_key"`
+	Name string `db:"name,not_null"`
+}
+
+type GormAndEITUser struct {
+	ID      int    `gorm:"column:id;primaryKey;autoIncrement" eit_db:"id,primary_key,auto_increment"`
+	Status  string `gorm:"column:status;not null;default:active" eit_db:"status,not_null,default=enabled"`
+	Profile string `gorm:"column:profile" eit_db:"profile,type=json"`
 }
 
 // TestInferSchema 测试从结构体推导 Schema
@@ -101,7 +112,7 @@ func TestToSnakeCase(t *testing.T) {
 // TestGetStructFields 测试获取结构体字段
 func TestGetStructFields(t *testing.T) {
 	fields := GetStructFields(TestUser{})
-	
+
 	expected := []string{"id", "username", "email", "age", "is_active", "created_at"}
 	if len(fields) != len(expected) {
 		t.Fatalf("Expected %d fields, got %d", len(expected), len(fields))
@@ -229,4 +240,49 @@ func TestSQLiteReflectionIntegration(t *testing.T) {
 	}
 
 	t.Log("✓ SQLite reflection integration test passed")
+}
+
+func TestInferSchemaLegacyDBTagCompatibility(t *testing.T) {
+	schema, err := InferSchema(LegacyTaggedUser{})
+	if err != nil {
+		t.Fatalf("InferSchema failed: %v", err)
+	}
+
+	id := schema.GetField("id")
+	if id == nil || !id.Primary {
+		t.Fatalf("expected id primary key from legacy db tag")
+	}
+
+	name := schema.GetField("name")
+	if name == nil || name.Null {
+		t.Fatalf("expected name not null from legacy db tag")
+	}
+}
+
+func TestInferSchemaMergeGormAndEITTag(t *testing.T) {
+	schema, err := InferSchema(GormAndEITUser{})
+	if err != nil {
+		t.Fatalf("InferSchema failed: %v", err)
+	}
+
+	id := schema.GetField("id")
+	if id == nil || !id.Primary || !id.Autoinc {
+		t.Fatalf("expected gorm/eit merged primary autoinc id field, got: %+v", id)
+	}
+
+	status := schema.GetField("status")
+	if status == nil {
+		t.Fatalf("status field not found")
+	}
+	if status.Null {
+		t.Fatalf("expected status not null from merged tags")
+	}
+	if status.Default != "enabled" {
+		t.Fatalf("expected eit_db default override 'enabled', got: %#v", status.Default)
+	}
+
+	profile := schema.GetField("profile")
+	if profile == nil || profile.Type != TypeJSON {
+		t.Fatalf("expected profile type override to json, got: %+v", profile)
+	}
 }

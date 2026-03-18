@@ -12,7 +12,8 @@ package db
 
 - 场景：SaaS 多租户（每个租户一个表）、分表分库、日志分表等
 - PostgreSQL：使用触发器（Trigger）+ 存储函数（Stored Function）
-- MySQL/SQLite：使用 GORM Hook（AfterCreate）
+- SQL Server：使用触发器（Trigger）+ T-SQL 过程能力
+- MySQL/SQLite：使用应用层 Hook（AfterCreate 思路）
 
 ### 2. 三步快速上手
 
@@ -46,6 +47,10 @@ hook := db.NewMySQLDynamicTableHook(mysqlAdapter)
 sqliteAdapter := repo.adapter.(*db.SQLiteAdapter)
 hook := db.NewSQLiteDynamicTableHook(sqliteAdapter)
 
+// 对于 SQL Server
+sqlServerAdapter := repo.adapter.(*db.SQLServerAdapter)
+hook := db.NewSQLServerDynamicTableHook(sqlServerAdapter)
+
 // 注册配置
 hook.RegisterDynamicTable(ctx, config)
 ```
@@ -60,23 +65,27 @@ hook.RegisterDynamicTable(ctx, config)
 tables, _ := hook.ListCreatedDynamicTables(ctx, "project_tasks")
 
 // 操作动态表
-gormDB := repo.GetGormDB()
-gormDB.Table("project_tasks_1").Create(&taskData)
+repo.Exec(ctx,
+    "INSERT INTO project_tasks_1 (title, status) VALUES (?, ?)",
+    taskData.Title,
+    taskData.Status,
+)
 ```
 
 ### 3. 字段类型速查
 
-| Go 类型 | PostgreSQL | MySQL | SQLite |
-|--------|-----------|-------|--------|
-| TypeString | VARCHAR(255) | VARCHAR(255) | TEXT |
-| TypeInteger | INTEGER | INT | INTEGER |
-| TypeFloat | FLOAT | FLOAT | REAL |
-| TypeBoolean | BOOLEAN | TINYINT(1) | INTEGER |
-| TypeTime | TIMESTAMP | DATETIME | TEXT |
-| TypeBinary | BYTEA | LONGBLOB | BLOB |
-| TypeDecimal | DECIMAL(18,2) | DECIMAL(18,2) | REAL |
-| TypeJSON | JSONB | JSON | TEXT |
-| TypeArray | TEXT[] | TEXT | TEXT |
+| Go 类型 | PostgreSQL | MySQL | SQLite | SQL Server |
+|--------|-----------|-------|--------|-----------|
+| TypeString | VARCHAR(255) | VARCHAR(255) | TEXT | NVARCHAR(255) |
+| TypeInteger | INTEGER | INT | INTEGER | INT |
+| TypeFloat | FLOAT | FLOAT | REAL | FLOAT |
+| TypeBoolean | BOOLEAN | TINYINT(1) | INTEGER | BIT |
+| TypeTime | TIMESTAMP | DATETIME | DATETIME | DATETIME2 |
+| TypeBinary | BYTEA | LONGBLOB | BLOB | VARBINARY(MAX) |
+| TypeDecimal | DECIMAL(18,2) | DECIMAL(18,2) | NUMERIC | DECIMAL(18,2) |
+| TypeJSON | JSONB | JSON | TEXT | NVARCHAR(MAX) |
+| TypeArray | TEXT[] | TEXT | TEXT | NVARCHAR(MAX) |
+| TypeLocation | POINT | POINT | TEXT | GEOGRAPHY |
 
 ### 4. 字段链式方法
 
@@ -125,7 +134,7 @@ config := db.NewDynamicTableConfig("temp_storage").
 hook.RegisterDynamicTable(ctx, config)
 
 // 需要时手动创建
-tableName, _ := hook.CreateDynamicTable(ctx, "temp_storage", 
+tableName, _ := hook.CreateDynamicTable(ctx, "temp_storage",
     map[string]interface{}{"id": 100})
 // 结果：temp_storage_100
 ```
@@ -172,6 +181,8 @@ case *db.MySQLAdapter:
     hook = db.NewMySQLDynamicTableHook(adapter)
 case *db.SQLiteAdapter:
     hook = db.NewSQLiteDynamicTableHook(adapter)
+case *db.SQLServerAdapter:
+    hook = db.NewSQLServerDynamicTableHook(adapter)
 default:
     panic("Unsupported adapter type")
 }
@@ -190,6 +201,13 @@ default:
 - ✅ 控制：完全在应用控制下，便于调试
 - ✅ 兼容：不依赖数据库特定功能
 - ✅ 监控：可添加日志、指标等
+
+### 11. SQL Server 触发器方案优势
+
+- ✅ 原生能力：可复用 Trigger + T-SQL 过程逻辑
+- ✅ 一致性：数据库事务内执行，减少应用层竞争条件
+- ✅ 企业集成：可与 SQL Server Agent / 审计能力协同
+- ✅ 可回退：不满足场景时可切换应用层 Hook 策略
 
 ### 完整示例
 
@@ -248,19 +266,19 @@ func main() {
 
 ### 常见问题速答
 
-**Q: 表名如何生成？**  
+**Q: 表名如何生成？**
 A: 默认为 `{配置表名}_{id}`，例如 `project_tasks_1`
 
-**Q: 如何修改命名规则？**  
+**Q: 如何修改命名规则？**
 A: 扩展 Hook 实现，重写 `generateTableName` 方法
 
-**Q: 已创建的表何时删除？**  
+**Q: 已创建的表何时删除？**
 A: 不自动删除，需要手动通过 SQL 删除或定期清理任务
 
-**Q: 是否支持外键约束？**  
+**Q: 是否支持外键约束？**
 A: 支持，但跨动态表的外键需要谨慎处理
 
-**Q: 性能如何？**  
+**Q: 性能如何？**
 A: PostgreSQL 触发器方案最优；MySQL/SQLite Hook 方案受应用逻辑影响
 
 详见 DYNAMIC_TABLE.md 完整文档

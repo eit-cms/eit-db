@@ -4,12 +4,16 @@ import (
 	"database/sql"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // InferSchema 从 Go struct 推导 Schema
-// 支持 struct tag: `db:"column_name,primary_key,not_null,unique,index,auto_increment"`
+// 支持 struct tag（优先级）：
+// 1) `eit_db:"column_name,primary_key,not_null,unique,index,auto_increment,default=...,type=..."`（推荐，避免与其他库的 `db` tag 命名冲突）
+// 2) `db:"..."`（兼容）
+// 3) `gorm:"column:...,primaryKey,not null,uniqueIndex,autoIncrement,default:..."`（兜底）
 func InferSchema(v interface{}) (*BaseSchema, error) {
 	val := reflect.ValueOf(v)
 	typ := val.Type()
@@ -37,14 +41,15 @@ func InferSchema(v interface{}) (*BaseSchema, error) {
 			continue
 		}
 
-		// 解析 db tag
-		dbTag := field.Tag.Get("db")
-		if dbTag == "-" {
+		columnName, options, ignored := resolveFieldSchemaTag(field)
+		if ignored {
 			continue // 忽略此字段
 		}
 
-		columnName, options := parseDBTag(dbTag, field.Name)
 		fieldType := inferFieldType(field.Type)
+		if options.typeOverride != nil {
+			fieldType = *options.typeOverride
+		}
 
 		// 构建字段
 		fb := NewField(columnName, fieldType)
@@ -72,6 +77,10 @@ func InferSchema(v interface{}) (*BaseSchema, error) {
 			fb.field.Autoinc = true
 		}
 
+		if options.hasDefault {
+			fb.field.Default = options.defaultValue
+		}
+
 		// 添加到 schema
 		schema.AddField(fb.Build())
 	}
@@ -86,9 +95,12 @@ type tagOptions struct {
 	unique        bool
 	index         bool
 	autoIncrement bool
+	hasDefault    bool
+	defaultValue  interface{}
+	typeOverride  *FieldType
 }
 
-// parseDBTag 解析 db tag
+// parseDBTag 解析 eit_db/db tag
 // 格式: "column_name,primary_key,not_null,unique,index,auto_increment"
 func parseDBTag(tag, fieldName string) (string, tagOptions) {
 	if tag == "" {
@@ -104,6 +116,25 @@ func parseDBTag(tag, fieldName string) (string, tagOptions) {
 	opts := tagOptions{}
 	for i := 1; i < len(parts); i++ {
 		opt := strings.TrimSpace(parts[i])
+		if opt == "" {
+			continue
+		}
+
+		if strings.HasPrefix(opt, "default=") {
+			raw := strings.TrimSpace(strings.TrimPrefix(opt, "default="))
+			opts.hasDefault = true
+			opts.defaultValue = parseDefaultValue(raw)
+			continue
+		}
+
+		if strings.HasPrefix(opt, "type=") {
+			rawType := strings.TrimSpace(strings.TrimPrefix(opt, "type="))
+			if ft, ok := parseFieldTypeAlias(rawType); ok {
+				opts.typeOverride = &ft
+			}
+			continue
+		}
+
 		switch opt {
 		case "primary_key", "primarykey", "pk":
 			opts.primaryKey = true
@@ -119,6 +150,153 @@ func parseDBTag(tag, fieldName string) (string, tagOptions) {
 	}
 
 	return columnName, opts
+}
+
+// parseGormTag 解析 gorm tag，提取可映射到 Schema 的核心信息。
+func parseGormTag(tag, fieldName string) (string, tagOptions) {
+	columnName := toSnakeCase(fieldName)
+	opts := tagOptions{}
+	if tag == "" {
+		return columnName, opts
+	}
+
+	parts := strings.Split(tag, ";")
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+
+		lower := strings.ToLower(item)
+		switch {
+		case strings.HasPrefix(lower, "column:"):
+			column := strings.TrimSpace(item[len("column:"):])
+			if column != "" {
+				columnName = column
+			}
+		case strings.HasPrefix(lower, "default:"):
+			raw := strings.TrimSpace(item[len("default:"):])
+			opts.hasDefault = true
+			opts.defaultValue = parseDefaultValue(raw)
+		case lower == "primarykey" || lower == "primary_key":
+			opts.primaryKey = true
+		case lower == "not null" || lower == "notnull":
+			opts.notNull = true
+		case lower == "unique" || lower == "uniqueindex" || lower == "unique_index":
+			opts.unique = true
+		case lower == "index":
+			opts.index = true
+		case lower == "autoincrement" || lower == "auto_increment":
+			opts.autoIncrement = true
+		}
+	}
+
+	return columnName, opts
+}
+
+func mergeTagOptions(base, override tagOptions) tagOptions {
+	merged := base
+	merged.notNull = merged.notNull || override.notNull
+	merged.primaryKey = merged.primaryKey || override.primaryKey
+	merged.unique = merged.unique || override.unique
+	merged.index = merged.index || override.index
+	merged.autoIncrement = merged.autoIncrement || override.autoIncrement
+	if override.hasDefault {
+		merged.hasDefault = true
+		merged.defaultValue = override.defaultValue
+	}
+	if override.typeOverride != nil {
+		merged.typeOverride = override.typeOverride
+	}
+	return merged
+}
+
+func resolveFieldSchemaTag(field reflect.StructField) (string, tagOptions, bool) {
+	gormColumn, gormOptions := parseGormTag(field.Tag.Get("gorm"), field.Name)
+
+	eitTag := field.Tag.Get("eit_db")
+	if eitTag == "-" {
+		return "", tagOptions{}, true
+	}
+	if eitTag != "" {
+		column, opts := parseDBTag(eitTag, field.Name)
+		if column == toSnakeCase(field.Name) && gormColumn != "" {
+			column = gormColumn
+		}
+		return column, mergeTagOptions(gormOptions, opts), false
+	}
+
+	legacyTag := field.Tag.Get("db")
+	if legacyTag == "-" {
+		return "", tagOptions{}, true
+	}
+	if legacyTag != "" {
+		column, opts := parseDBTag(legacyTag, field.Name)
+		if column == toSnakeCase(field.Name) && gormColumn != "" {
+			column = gormColumn
+		}
+		return column, mergeTagOptions(gormOptions, opts), false
+	}
+
+	return gormColumn, gormOptions, false
+}
+
+func parseDefaultValue(raw string) interface{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(raw)
+	if lower == "true" {
+		return true
+	}
+	if lower == "false" {
+		return false
+	}
+	if i, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		return i
+	}
+	if f, err := strconv.ParseFloat(raw, 64); err == nil {
+		return f
+	}
+
+	if len(raw) >= 2 {
+		if (raw[0] == '\'' && raw[len(raw)-1] == '\'') || (raw[0] == '"' && raw[len(raw)-1] == '"') {
+			return raw[1 : len(raw)-1]
+		}
+	}
+
+	return raw
+}
+
+func parseFieldTypeAlias(raw string) (FieldType, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "string", "text", "varchar":
+		return TypeString, true
+	case "int", "integer", "uint":
+		return TypeInteger, true
+	case "float", "double", "real":
+		return TypeFloat, true
+	case "bool", "boolean":
+		return TypeBoolean, true
+	case "time", "datetime", "timestamp":
+		return TypeTime, true
+	case "binary", "blob", "bytes":
+		return TypeBinary, true
+	case "decimal", "numeric":
+		return TypeDecimal, true
+	case "map":
+		return TypeMap, true
+	case "array":
+		return TypeArray, true
+	case "json":
+		return TypeJSON, true
+	case "location", "geo", "geography", "point", "geopoint":
+		return TypeLocation, true
+	default:
+		return "", false
+	}
 }
 
 // inferFieldType 从 Go 类型推导 FieldType
@@ -243,8 +421,10 @@ func ScanStructs(rows *sql.Rows, dest interface{}) error {
 			continue
 		}
 
-		dbTag := field.Tag.Get("db")
-		columnName, _ := parseDBTag(dbTag, field.Name)
+		columnName, _, ignored := resolveFieldSchemaTag(field)
+		if ignored {
+			continue
+		}
 		fieldMap[columnName] = i
 	}
 
@@ -288,7 +468,7 @@ func ScanStructs(rows *sql.Rows, dest interface{}) error {
 	return nil
 }
 
-// GetStructFields 获取结构体的字段名列表（按 db tag 顺序）
+// GetStructFields 获取结构体的字段名列表（按 eit_db/db/gorm 解析顺序）
 func GetStructFields(v interface{}) []string {
 	typ := reflect.TypeOf(v)
 	if typ.Kind() == reflect.Ptr {
@@ -306,12 +486,10 @@ func GetStructFields(v interface{}) []string {
 			continue
 		}
 
-		dbTag := field.Tag.Get("db")
-		if dbTag == "-" {
+		columnName, _, ignored := resolveFieldSchemaTag(field)
+		if ignored {
 			continue
 		}
-
-		columnName, _ := parseDBTag(dbTag, field.Name)
 		fields = append(fields, columnName)
 	}
 
@@ -337,8 +515,8 @@ func GetStructValues(v interface{}) []interface{} {
 			continue
 		}
 
-		dbTag := field.Tag.Get("db")
-		if dbTag == "-" {
+		_, _, ignored := resolveFieldSchemaTag(field)
+		if ignored {
 			continue
 		}
 

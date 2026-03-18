@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 )
 
@@ -10,16 +11,17 @@ import (
 type FieldType string
 
 const (
-	TypeString    FieldType = "string"
-	TypeInteger   FieldType = "integer"
-	TypeFloat     FieldType = "float"
-	TypeBoolean   FieldType = "boolean"
-	TypeTime      FieldType = "time"
-	TypeBinary    FieldType = "binary"
-	TypeDecimal   FieldType = "decimal"
-	TypeMap       FieldType = "map"
-	TypeArray     FieldType = "array"
-	TypeJSON      FieldType = "json"
+	TypeString   FieldType = "string"
+	TypeInteger  FieldType = "integer"
+	TypeFloat    FieldType = "float"
+	TypeBoolean  FieldType = "boolean"
+	TypeTime     FieldType = "time"
+	TypeBinary   FieldType = "binary"
+	TypeDecimal  FieldType = "decimal"
+	TypeMap      FieldType = "map"
+	TypeArray    FieldType = "array"
+	TypeJSON     FieldType = "json"
+	TypeLocation FieldType = "location"
 )
 
 // Field 定义模式中的字段
@@ -36,34 +38,105 @@ type Field struct {
 	Transformers []Transformer
 }
 
+// ConstraintKind 表级约束类型
+type ConstraintKind string
+
+const (
+	ConstraintPrimaryKey ConstraintKind = "primary_key"
+	ConstraintUnique     ConstraintKind = "unique"
+	ConstraintForeignKey ConstraintKind = "foreign_key"
+)
+
+// TableConstraint 表级约束定义（用于复合主键、复合唯一约束、复合外键等）
+type TableConstraint struct {
+	Name   string
+	Kind   ConstraintKind
+	Fields []string
+	// 外键专属字段（Kind == ConstraintForeignKey 时有效）
+	RefTable  string   // 被引用表名
+	RefFields []string // 被引用列名（顺序与 Fields 对应）
+	OnDelete  string   // "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | ""
+	OnUpdate  string   // "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | ""
+	// 可选：外键热点查询视图声明（仅当 Kind == ConstraintForeignKey 时有意义）
+	ViewHint *ViewHint
+}
+
+// ViewHint 外键约束上的视图提示，声明该关联应创建（或复用）的跨表视图。
+// 适用于高热点跨表查询场景，由 Migration 阶段自动生成视图 DDL，
+// 运行时由 QueryBuilder 自动路由到视图而非直接 JOIN。
+type ViewHint struct {
+	// ViewName 视图名称；空时自动生成为 "<localTable>_<refTable>_view"。
+	ViewName string
+	// Materialized 是否物化视图（PostgreSQL MATERIALIZED VIEW）。
+	// SQL Server 忽略此标志，始终创建普通视图。
+	Materialized bool
+	// Columns 视图 SELECT 的列表达式列表；空表示 "local_alias.*, ref_alias.*"。
+	// 建议指定明确的列以避免歧义，例如 []string{"o.id AS order_id", "u.name"}。
+	Columns []string
+	// JoinType LEFT/RIGHT/INNER；空时默认为 INNER。
+	JoinType string
+}
+
+// FKOption 外键约束选项（函数选项模式）。
+type FKOption func(*TableConstraint)
+
+// WithViewHint 为外键约束附加视图提示，声明该关联的热点查询视图。
+//
+//	// 创建 user_orders_view，查询 orders JOIN users：
+//	schema.AddForeignKey("fk_orders_users",
+//		[]string{"user_id"}, "users", []string{"id"}, "CASCADE", "",
+//		WithViewHint("user_orders_view", false))
+func WithViewHint(viewName string, materialized bool, columns ...string) FKOption {
+	return func(tc *TableConstraint) {
+		tc.ViewHint = &ViewHint{
+			ViewName:     viewName,
+			Materialized: materialized,
+			Columns:      append([]string(nil), columns...),
+		}
+	}
+}
+
+// WithJoinType 为外键约束的视图提示指定 JOIN 类型（"LEFT" / "INNER" / "RIGHT"）。
+// 仅当已通过 WithViewHint 设置视图提示时才有效。
+func WithJoinType(joinType string) FKOption {
+	return func(tc *TableConstraint) {
+		if tc.ViewHint == nil {
+			return
+		}
+		tc.ViewHint.JoinType = strings.ToUpper(strings.TrimSpace(joinType))
+	}
+}
+
 // Schema 定义数据模式接口 (参考 Ecto.Schema)
 type Schema interface {
 	// 获取模式名称（表名）
 	TableName() string
-	
+
 	// 获取所有字段
 	Fields() []*Field
-	
+
 	// 获取字段
 	GetField(name string) *Field
-	
+
 	// 获取主键字段
 	PrimaryKeyField() *Field
 }
 
 // BaseSchema 基础模式实现
 type BaseSchema struct {
-	tableName string
-	fields    map[string]*Field
-	fieldList []*Field
+	tableName   string
+	fields      map[string]*Field
+	fieldList   []*Field
+	constraints []TableConstraint
 }
 
 // NewBaseSchema 创建基础模式
 func NewBaseSchema(tableName string) *BaseSchema {
 	return &BaseSchema{
-		tableName: tableName,
-		fields:    make(map[string]*Field),
-		fieldList: make([]*Field, 0),
+		tableName:   tableName,
+		fields:      make(map[string]*Field),
+		fieldList:   make([]*Field, 0),
+		constraints: make([]TableConstraint, 0),
 	}
 }
 
@@ -76,6 +149,43 @@ func (s *BaseSchema) TableName() string {
 func (s *BaseSchema) AddField(field *Field) *BaseSchema {
 	s.fields[field.Name] = field
 	s.fieldList = append(s.fieldList, field)
+	return s
+}
+
+// AddTimestamps 添加常用时间戳字段 created_at / updated_at。
+// 默认行为：
+// - 字段类型为 TypeTime
+// - 非空（NOT NULL）
+// - 默认值为 CURRENT_TIMESTAMP
+// - 若字段已存在则跳过，避免重复添加
+func (s *BaseSchema) AddTimestamps() *BaseSchema {
+	if s.GetField("created_at") == nil {
+		s.AddField(NewField("created_at", TypeTime).
+			Null(false).
+			Default("CURRENT_TIMESTAMP").
+			Build())
+	}
+
+	if s.GetField("updated_at") == nil {
+		s.AddField(NewField("updated_at", TypeTime).
+			Null(false).
+			Default("CURRENT_TIMESTAMP").
+			Build())
+	}
+
+	return s
+}
+
+// AddSoftDelete 添加软删除字段 deleted_at。
+// 默认行为：
+// - 字段类型为 TypeTime
+// - 可空（NULL）
+// - 若字段已存在则跳过，避免重复添加
+func (s *BaseSchema) AddSoftDelete() *BaseSchema {
+	if s.GetField("deleted_at") == nil {
+		s.AddField(NewField("deleted_at", TypeTime).Null(true).Build())
+	}
+
 	return s
 }
 
@@ -97,6 +207,85 @@ func (s *BaseSchema) PrimaryKeyField() *Field {
 		}
 	}
 	return nil
+}
+
+// Constraints 返回所有表级约束
+func (s *BaseSchema) Constraints() []TableConstraint {
+	return append([]TableConstraint(nil), s.constraints...)
+}
+
+// AddPrimaryKey 添加表级主键约束（支持复合主键）
+func (s *BaseSchema) AddPrimaryKey(fields ...string) *BaseSchema {
+	normalized := normalizeConstraintFields(fields)
+	if len(normalized) == 0 {
+		return s
+	}
+
+	s.constraints = append(s.constraints, TableConstraint{
+		Kind:   ConstraintPrimaryKey,
+		Fields: normalized,
+	})
+
+	return s
+}
+
+// AddUniqueConstraint 添加表级唯一约束（支持复合唯一）
+func (s *BaseSchema) AddUniqueConstraint(name string, fields ...string) *BaseSchema {
+	normalized := normalizeConstraintFields(fields)
+	if len(normalized) == 0 {
+		return s
+	}
+
+	s.constraints = append(s.constraints, TableConstraint{
+		Name:   name,
+		Kind:   ConstraintUnique,
+		Fields: normalized,
+	})
+
+	return s
+}
+
+// AddForeignKey 添加表级外键约束（支持复合外键）。
+// onDelete/onUpdate 可选值："CASCADE", "SET NULL", "RESTRICT", "NO ACTION", ""（使用数据库默认）。
+// opts 可选附加 WithViewHint / WithJoinType 等函数选项以声明热点查询视图。
+func (s *BaseSchema) AddForeignKey(name string, localFields []string, refTable string, refFields []string, onDelete, onUpdate string, opts ...FKOption) *BaseSchema {
+	normalized := normalizeConstraintFields(localFields)
+	if len(normalized) == 0 || refTable == "" {
+		return s
+	}
+	normalizedRef := normalizeConstraintFields(refFields)
+	tc := TableConstraint{
+		Name:      name,
+		Kind:      ConstraintForeignKey,
+		Fields:    normalized,
+		RefTable:  refTable,
+		RefFields: normalizedRef,
+		OnDelete:  onDelete,
+		OnUpdate:  onUpdate,
+	}
+	for _, opt := range opts {
+		opt(&tc)
+	}
+	s.constraints = append(s.constraints, tc)
+	return s
+}
+
+func normalizeConstraintFields(fields []string) []string {
+	result := make([]string, 0, len(fields))
+	seen := make(map[string]struct{})
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if _, ok := seen[field]; ok {
+			continue
+		}
+		seen[field] = struct{}{}
+		result = append(result, field)
+	}
+
+	return result
 }
 
 // FieldBuilder 字段构造器
@@ -199,7 +388,7 @@ func (v *LengthValidator) Validate(value interface{}) error {
 	if !ok {
 		return NewValidationError("length", "字段类型必须为字符串")
 	}
-	
+
 	len := len(str)
 	if v.Min > 0 && len < v.Min {
 		return NewValidationError("length", "字段长度不能小于 "+string(rune(v.Min)))
@@ -407,36 +596,58 @@ func Timestamp() time.Time {
 type QueryConstructor interface {
 	// 条件查询
 	Where(condition Condition) QueryConstructor
-	
+
 	// 多条件 AND 组合
 	WhereAll(conditions ...Condition) QueryConstructor
-	
+
 	// 多条件 OR 组合
 	WhereAny(conditions ...Condition) QueryConstructor
-	
+
 	// 字段选择
 	Select(fields ...string) QueryConstructor
-	
+
 	// 排序
 	OrderBy(field string, direction string) QueryConstructor // direction: "ASC" | "DESC"
-	
+
 	// 分页
 	Limit(count int) QueryConstructor
 	Offset(count int) QueryConstructor
-	
+
+	// 跨表查询（JOIN）
+	FromAlias(alias string) QueryConstructor
+	Join(table, onClause string, alias ...string) QueryConstructor
+	LeftJoin(table, onClause string, alias ...string) QueryConstructor
+	RightJoin(table, onClause string, alias ...string) QueryConstructor
+	CrossJoin(table string, alias ...string) QueryConstructor
+
+	// 跨表查询策略（方言级默认 + 显式覆盖）
+	CrossTableStrategy(strategy CrossTableStrategy) QueryConstructor
+
 	// 构建查询
 	Build(ctx context.Context) (string, []interface{}, error)
-	
+
 	// 获取底层查询构造器（用于 Adapter 特定优化）
 	GetNativeBuilder() interface{}
 }
+
+// CrossTableStrategy 跨表查询策略。
+type CrossTableStrategy string
+
+const (
+	// CrossTableStrategyAuto 自动策略：由方言默认行为决定（推荐默认）。
+	CrossTableStrategyAuto CrossTableStrategy = "auto"
+	// CrossTableStrategyPreferTempTable 优先临时表策略（例如 SQL Server 的复杂跨表查询）。
+	CrossTableStrategyPreferTempTable CrossTableStrategy = "prefer_temp_table"
+	// CrossTableStrategyForceDirectJoin 强制直接 JOIN，不走临时表改写。
+	CrossTableStrategyForceDirectJoin CrossTableStrategy = "force_direct_join"
+)
 
 // Condition 条件接口 - 中层转义
 // Adapter 实现此接口将条件转换为数据库特定的形式
 type Condition interface {
 	// 获取条件类型
 	Type() string
-	
+
 	// 将条件转换为 SQL/Cypher/etc
 	Translate(translator ConditionTranslator) (string, []interface{}, error)
 }
@@ -453,7 +664,7 @@ type ConditionTranslator interface {
 // SimpleCondition 简单条件（字段 操作符 值）
 type SimpleCondition struct {
 	Field    string
-	Operator string // "eq", "ne", "gt", "lt", "gte", "lte", "in", "like", "between"
+	Operator string // "eq", "ne", "gt", "lt", "gte", "lte", "in", "like", "between", "full_text"
 	Value    interface{}
 }
 
@@ -467,7 +678,7 @@ func (c *SimpleCondition) Translate(translator ConditionTranslator) (string, []i
 
 // CompositeCondition 复合条件（AND/OR）
 type CompositeCondition struct {
-	Operator   string        // "and" | "or"
+	Operator   string // "and" | "or"
 	Conditions []Condition
 }
 
@@ -512,6 +723,24 @@ func Eq(field string, value interface{}) Condition {
 		Operator: "eq",
 		Value:    value,
 	}
+}
+
+// EqFields 多字段等值条件（适用于复合主键/复合唯一键定位）
+func EqFields(values map[string]interface{}) Condition {
+	conditions := make([]Condition, 0, len(values))
+	for field, value := range values {
+		conditions = append(conditions, Eq(field, value))
+	}
+
+	if len(conditions) == 0 {
+		return nil
+	}
+
+	if len(conditions) == 1 {
+		return conditions[0]
+	}
+
+	return And(conditions...)
 }
 
 // Ne 不等于条件
@@ -583,6 +812,15 @@ func Like(field string, pattern string) Condition {
 		Field:    field,
 		Operator: "like",
 		Value:    pattern,
+	}
+}
+
+// FullText 全文检索条件（由方言翻译器决定具体语法）
+func FullText(field string, query string) Condition {
+	return &SimpleCondition{
+		Field:    field,
+		Operator: "full_text",
+		Value:    query,
 	}
 }
 

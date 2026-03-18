@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 )
 
@@ -361,5 +362,51 @@ func TestCombinedValidations(t *testing.T) {
 
 	if !cs.IsValid() {
 		t.Errorf("Combined validations failed, errors: %v", cs.Errors())
+	}
+}
+
+func TestValidateWithLocaleForLocaleAwareValidators(t *testing.T) {
+	prev := GetValidationLocale()
+	defer func() {
+		_ = SetValidationLocale(prev)
+	}()
+
+	schema := NewBaseSchema("profiles")
+	schema.AddField(NewField("id_card", TypeString).Validate(&IDCardValidator{}).Build())
+
+	csUS := NewChangeset(schema).Cast(map[string]interface{}{"id_card": "123-45-6789"})
+	csUS.ValidateWithLocale("en-US")
+	if !csUS.IsValid() {
+		t.Fatalf("expected en-US id format to pass with ValidateWithLocale, errors: %v", csUS.Errors())
+	}
+
+	csZH := NewChangeset(schema).Cast(map[string]interface{}{"id_card": "123-45-6789"})
+	csZH.ValidateWithLocale("zh-CN")
+	if csZH.IsValid() {
+		t.Fatalf("expected en-US id format to fail under zh-CN locale")
+	}
+}
+
+func TestValidateWithContextPropagatesLocale(t *testing.T) {
+	prev := GetValidationLocale()
+	defer func() {
+		_ = SetValidationLocale(prev)
+	}()
+
+	schema := NewBaseSchema("profiles")
+	schema.AddField(NewField("postal_code", TypeString).Validate(&PostalCodeValidator{}).Build())
+
+	ctxUS := WithValidationLocale(context.Background(), "en-US")
+	csUS := NewChangeset(schema).Cast(map[string]interface{}{"postal_code": "94105-1234"})
+	csUS.ValidateWithContext(ctxUS)
+	if !csUS.IsValid() {
+		t.Fatalf("expected US ZIP to pass with context locale, errors: %v", csUS.Errors())
+	}
+
+	ctxZH := WithValidationLocale(context.Background(), "zh-CN")
+	csZH := NewChangeset(schema).Cast(map[string]interface{}{"postal_code": "94105-1234"})
+	csZH.ValidateWithContext(ctxZH)
+	if csZH.IsValid() {
+		t.Fatalf("expected US ZIP to fail under zh-CN context locale")
 	}
 }

@@ -239,3 +239,22 @@ func (f *DynamicTableField) WithDescription(desc string) *DynamicTableField {
 	f.Description = desc
 	return f
 }
+
+// toSchema 将动态表配置转换为统一的 Schema 定义，便于复用框架级建表逻辑。
+func (c *DynamicTableConfig) toSchema(tableName string) Schema {
+	schema := NewBaseSchema(tableName)
+	for _, field := range c.Fields {
+		schema.AddField(&Field{
+			Name:    field.Name,
+			Type:    field.Type,
+			Default: field.Default,
+			Null:    field.Null,
+			Primary: field.Primary,
+			Autoinc: field.Autoinc,
+			Index:   field.Index,
+			Unique:  field.Unique,
+		})
+	}
+
+	return schema
+}
