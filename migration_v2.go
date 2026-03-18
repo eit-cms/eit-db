@@ -7,17 +7,21 @@ import (
 	"time"
 )
 
+type constraintSchema interface {
+	Constraints() []TableConstraint
+}
+
 // Migration 接口 - 每个迁移文件都需要实现这个接口
 type MigrationInterface interface {
 	// Up 执行迁移
 	Up(ctx context.Context, repo *Repository) error
-	
+
 	// Down 回滚迁移
 	Down(ctx context.Context, repo *Repository) error
-	
+
 	// Version 返回迁移版本号（通常是时间戳）
 	Version() string
-	
+
 	// Description 返回迁移描述
 	Description() string
 }
@@ -76,11 +80,30 @@ func (m *SchemaMigration) DropTable(schema Schema) *SchemaMigration {
 
 // Up 执行迁移
 func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
+	// Phase 1: 创建所有表
 	for _, schema := range m.createSchemas {
-		tableName := schema.TableName()
-		createSQL := buildCreateTableSQL(repo, schema)
-		if _, err := repo.Exec(ctx, createSQL); err != nil {
-			return fmt.Errorf("failed to create table %s: %w", tableName, err)
+		creatSQL := buildCreateTableSQL(repo, schema)
+		if _, err := repo.Exec(ctx, creatSQL); err != nil {
+			return fmt.Errorf("failed to create table %s: %w", schema.TableName(), err)
+		}
+	}
+	// Phase 2: 创建视图（FK ViewHint 声明的热点查询视图）
+	for _, schema := range m.createSchemas {
+		cs, ok := schema.(constraintSchema)
+		if !ok {
+			continue
+		}
+		for _, c := range cs.Constraints() {
+			if c.Kind != ConstraintForeignKey || c.ViewHint == nil {
+				continue
+			}
+			viewSQL, err := buildViewFromFKHintSQL(repo, schema.TableName(), c)
+			if err != nil {
+				return fmt.Errorf("failed to build view for FK %s: %w", c.Name, err)
+			}
+			if _, err := repo.Exec(ctx, viewSQL); err != nil {
+				return fmt.Errorf("failed to create view for FK %s: %w", c.Name, err)
+			}
 		}
 	}
 	return nil
@@ -88,7 +111,29 @@ func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
 
 // Down 回滚迁移
 func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
-	// 先删除 Up 中创建的表
+	// Phase 1: 逆序删除视图（视图引用表，必须先删）
+	for i := len(m.createSchemas) - 1; i >= 0; i-- {
+		schema := m.createSchemas[i]
+		cs, ok := schema.(constraintSchema)
+		if !ok {
+			continue
+		}
+		for _, c := range cs.Constraints() {
+			if c.Kind != ConstraintForeignKey || c.ViewHint == nil {
+				continue
+			}
+			hint := c.ViewHint
+			viewName := hint.ViewName
+			if viewName == "" {
+				viewName = schema.TableName() + "_" + c.RefTable + "_view"
+			}
+			dropViewSQL := buildDropViewSQL(repo, viewName, hint.Materialized)
+			if _, err := repo.Exec(ctx, dropViewSQL); err != nil {
+				return fmt.Errorf("failed to drop view %s: %w", viewName, err)
+			}
+		}
+	}
+	// Phase 2: 逆序删除表
 	for i := len(m.createSchemas) - 1; i >= 0; i-- {
 		schema := m.createSchemas[i]
 		dropSQL := buildDropTableSQL(repo, schema.TableName())
@@ -96,12 +141,11 @@ func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
 			return fmt.Errorf("failed to drop table %s: %w", schema.TableName(), err)
 		}
 	}
-	
-	// 然后恢复 Up 中删除的表
+	// Phase 3: 恢复 Up 中删除的表
 	for _, schema := range m.dropSchemas {
 		tableName := schema.TableName()
-		createSQL := buildCreateTableSQL(repo, schema)
-		if _, err := repo.Exec(ctx, createSQL); err != nil {
+		creatSQL := buildCreateTableSQL(repo, schema)
+		if _, err := repo.Exec(ctx, creatSQL); err != nil {
 			return fmt.Errorf("failed to recreate table %s: %w", tableName, err)
 		}
 	}
@@ -109,86 +153,274 @@ func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
 }
 
 func buildCreateTableSQL(repo *Repository, schema Schema) string {
+	adapter := repo.GetAdapter()
+	dialect := resolveMigrationDialect(repo)
+	quotedTableName := dialect.QuoteIdentifier(schema.TableName())
+
+	primaryFields, uniqueConstraints, fkConstraints := collectTableConstraints(adapter, schema)
+	effectiveInlinePrimary := ""
+	if len(primaryFields) == 1 {
+		effectiveInlinePrimary = primaryFields[0]
+	}
+
 	columns := make([]string, 0, len(schema.Fields()))
 	for _, field := range schema.Fields() {
-		columns = append(columns, buildColumnDefinition(repo.GetAdapter(), field))
+		columns = append(columns, buildColumnDefinition(adapter, dialect, field, field.Name == effectiveInlinePrimary))
+	}
+
+	if len(primaryFields) > 1 {
+		columns = append(columns, fmt.Sprintf("PRIMARY KEY (%s)", joinQuotedIdentifiers(dialect, primaryFields)))
+	}
+
+	for _, unique := range uniqueConstraints {
+		uniqueSQL := fmt.Sprintf("UNIQUE (%s)", joinQuotedIdentifiers(dialect, unique.Fields))
+		if unique.Name != "" {
+			uniqueSQL = fmt.Sprintf("CONSTRAINT %s %s", dialect.QuoteIdentifier(unique.Name), uniqueSQL)
+		}
+		columns = append(columns, uniqueSQL)
+	}
+
+	for _, fk := range fkConstraints {
+		localCols := joinQuotedIdentifiers(dialect, fk.Fields)
+		refTable := dialect.QuoteIdentifier(fk.RefTable)
+		refCols := joinQuotedIdentifiers(dialect, fk.RefFields)
+		fkSQL := fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)", localCols, refTable, refCols)
+		if fk.OnDelete != "" {
+			fkSQL += " ON DELETE " + fk.OnDelete
+		}
+		if fk.OnUpdate != "" {
+			fkSQL += " ON UPDATE " + fk.OnUpdate
+		}
+		if fk.Name != "" {
+			fkSQL = fmt.Sprintf("CONSTRAINT %s %s", dialect.QuoteIdentifier(fk.Name), fkSQL)
+		}
+		columns = append(columns, fkSQL)
 	}
 
 	columnsSQL := strings.Join(columns, ", ")
 	tableName := schema.TableName()
 
-	switch repo.GetAdapter().(type) {
+	switch adapter.(type) {
 	case *SQLServerAdapter:
-		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL CREATE TABLE %s (%s)", tableName, tableName, columnsSQL)
+		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NULL CREATE TABLE %s (%s)", tableName, quotedTableName, columnsSQL)
 	default:
-		return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", tableName, columnsSQL)
+		return fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", quotedTableName, columnsSQL)
 	}
 }
 
 func buildDropTableSQL(repo *Repository, tableName string) string {
+	quotedTableName := resolveMigrationDialect(repo).QuoteIdentifier(tableName)
+
 	switch repo.GetAdapter().(type) {
 	case *SQLServerAdapter:
-		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", tableName, tableName)
+		return fmt.Sprintf("IF OBJECT_ID('%s', 'U') IS NOT NULL DROP TABLE %s", tableName, quotedTableName)
 	default:
-		return fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+		return fmt.Sprintf("DROP TABLE IF EXISTS %s", quotedTableName)
 	}
 }
 
-func buildColumnDefinition(adapter Adapter, field *Field) string {
+func resolveMigrationDialect(repo *Repository) SQLDialect {
+	if repo == nil || repo.GetAdapter() == nil {
+		return NewMySQLDialect()
+	}
+
+	provider := repo.GetAdapter().GetQueryBuilderProvider()
+	if p, ok := provider.(*DefaultSQLQueryConstructorProvider); ok && p.dialect != nil {
+		return p.dialect
+	}
+
+	return NewMySQLDialect()
+}
+
+func joinQuotedIdentifiers(dialect SQLDialect, fields []string) string {
+	quoted := make([]string, 0, len(fields))
+	for _, field := range fields {
+		quoted = append(quoted, dialect.QuoteIdentifier(field))
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func collectTableConstraints(adapter Adapter, schema Schema) ([]string, []TableConstraint, []TableConstraint) {
+	primaryFields := make([]string, 0)
+	for _, field := range schema.Fields() {
+		if field.Primary {
+			primaryFields = append(primaryFields, field.Name)
+		}
+	}
+
+	uniqueConstraints := make([]TableConstraint, 0)
+	fkConstraints := make([]TableConstraint, 0)
+	if cs, ok := schema.(constraintSchema); ok {
+		for _, c := range cs.Constraints() {
+			switch c.Kind {
+			case ConstraintPrimaryKey:
+				if len(c.Fields) > 0 {
+					primaryFields = append([]string(nil), c.Fields...)
+				}
+			case ConstraintUnique:
+				if len(c.Fields) > 0 {
+					uniqueConstraints = append(uniqueConstraints, c)
+				}
+			case ConstraintForeignKey:
+				if len(c.Fields) > 0 && c.RefTable != "" {
+					fkConstraints = append(fkConstraints, c)
+				}
+			}
+		}
+	}
+
+	primaryFields = normalizeConstraintFields(primaryFields)
+
+	supportsCompositeKeys := true
+	supportsCompositeIndexes := true
+	supportsForeignKeys := true
+	supportsCompositeForeignKeys := true
+	if adapter != nil {
+		if features := adapter.GetDatabaseFeatures(); features != nil {
+			supportsCompositeKeys = features.SupportsCompositeKeys
+			supportsCompositeIndexes = features.SupportsCompositeIndexes
+			supportsForeignKeys = features.SupportsForeignKeys
+			supportsCompositeForeignKeys = features.SupportsCompositeForeignKeys
+		}
+	}
+
+	if len(primaryFields) > 1 && !supportsCompositeKeys {
+		uniqueConstraints = append(uniqueConstraints, TableConstraint{
+			Name:   "uk_fallback_composite_pk",
+			Kind:   ConstraintUnique,
+			Fields: append([]string(nil), primaryFields...),
+		})
+		primaryFields = primaryFields[:1]
+	}
+
+	filteredUnique := make([]TableConstraint, 0, len(uniqueConstraints))
+	for _, c := range uniqueConstraints {
+		fields := normalizeConstraintFields(c.Fields)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) > 1 && !supportsCompositeIndexes {
+			continue
+		}
+		c.Fields = fields
+		filteredUnique = append(filteredUnique, c)
+	}
+
+	// 外键约束：不支持外键时全部跳过；支持但不支持复合外键时降级为单列 FK
+	filteredFK := make([]TableConstraint, 0, len(fkConstraints))
+	if supportsForeignKeys {
+		for _, fk := range fkConstraints {
+			localFields := normalizeConstraintFields(fk.Fields)
+			refFields := normalizeConstraintFields(fk.RefFields)
+			if len(localFields) == 0 || fk.RefTable == "" {
+				continue
+			}
+			if len(localFields) > 1 && !supportsCompositeForeignKeys {
+				// 降级：仅保留第一列的单列 FK
+				localFields = localFields[:1]
+				if len(refFields) > 1 {
+					refFields = refFields[:1]
+				}
+			}
+			fk.Fields = localFields
+			fk.RefFields = refFields
+			filteredFK = append(filteredFK, fk)
+		}
+	}
+
+	return primaryFields, filteredUnique, filteredFK
+}
+
+func buildColumnDefinition(adapter Adapter, dialect SQLDialect, field *Field, inlinePrimary bool) string {
+	effective := *field
+	effective.Primary = inlinePrimary
+	if !inlinePrimary {
+		effective.Autoinc = false
+	}
+
 	switch adapter.(type) {
 	case *PostgreSQLAdapter:
-		return buildPostgresColumn(field)
+		return buildPostgresColumn(&effective, adapter)
 	case *MySQLAdapter:
-		return buildMySQLColumn(field)
+		return buildMySQLColumn(&effective)
 	case *SQLiteAdapter:
-		return buildSQLiteColumn(field)
+		return buildSQLiteColumn(&effective)
 	case *SQLServerAdapter:
-		return buildSQLServerColumn(field)
+		return buildSQLServerColumn(&effective)
 	default:
-		return buildGenericColumn(field)
+		return buildGenericColumn(&effective, dialect)
 	}
 }
 
-func buildPostgresColumn(field *Field) string {
+func buildPostgresColumn(field *Field, adapter Adapter) string {
+	name := quoteColumnIdentifier("postgres", field.Name)
 	if field.Primary && field.Autoinc {
-		return fmt.Sprintf("%s SERIAL PRIMARY KEY", field.Name)
+		return fmt.Sprintf("%s SERIAL PRIMARY KEY", name)
 	}
-	col := fmt.Sprintf("%s %s", field.Name, mapPostgresType(field.Type))
+	col := fmt.Sprintf("%s %s", name, mapPostgresType(field.Type, adapter))
 	return applyColumnConstraints(col, field)
 }
 
 func buildMySQLColumn(field *Field) string {
+	name := quoteColumnIdentifier("mysql", field.Name)
 	if field.Primary && field.Autoinc {
-		return fmt.Sprintf("%s INT AUTO_INCREMENT PRIMARY KEY", field.Name)
+		return fmt.Sprintf("%s INT AUTO_INCREMENT PRIMARY KEY", name)
 	}
-	col := fmt.Sprintf("%s %s", field.Name, mapMySQLType(field.Type))
+	col := fmt.Sprintf("%s %s", name, mapMySQLType(field.Type))
 	return applyColumnConstraints(col, field)
 }
 
 func buildSQLiteColumn(field *Field) string {
+	name := quoteColumnIdentifier("sqlite", field.Name)
 	if field.Primary && field.Autoinc {
-		return fmt.Sprintf("%s INTEGER PRIMARY KEY AUTOINCREMENT", field.Name)
+		return fmt.Sprintf("%s INTEGER PRIMARY KEY AUTOINCREMENT", name)
 	}
-	col := fmt.Sprintf("%s %s", field.Name, mapSQLiteType(field.Type))
+	col := fmt.Sprintf("%s %s", name, mapSQLiteType(field.Type))
 	return applyColumnConstraints(col, field)
 }
 
 func buildSQLServerColumn(field *Field) string {
+	name := quoteColumnIdentifier("sqlserver", field.Name)
 	if field.Primary && field.Autoinc {
-		return fmt.Sprintf("%s INT IDENTITY(1,1) PRIMARY KEY", field.Name)
+		return fmt.Sprintf("%s INT IDENTITY(1,1) PRIMARY KEY", name)
 	}
-	col := fmt.Sprintf("%s %s", field.Name, mapSQLServerType(field.Type))
+	col := fmt.Sprintf("%s %s", name, mapSQLServerType(field.Type))
 	return applyColumnConstraints(col, field)
 }
 
-func buildGenericColumn(field *Field) string {
-	col := fmt.Sprintf("%s %s", field.Name, "TEXT")
+func buildGenericColumn(field *Field, dialect SQLDialect) string {
+	name := field.Name
+	if dialect != nil {
+		name = dialect.QuoteIdentifier(field.Name)
+	}
+	col := fmt.Sprintf("%s %s", name, "TEXT")
 	return applyColumnConstraints(col, field)
+}
+
+func quoteColumnIdentifier(dialectName, name string) string {
+	switch dialectName {
+	case "postgres":
+		return quoteIdentifierWithDelimiter(name, `"`, `"`)
+	case "mysql":
+		return quoteIdentifierWithDelimiter(name, "`", "`")
+	case "sqlite":
+		return quoteIdentifierWithDelimiter(name, "`", "`")
+	case "sqlserver":
+		return quoteIdentifierWithDelimiter(name, "[", "]")
+	default:
+		return name
+	}
 }
 
 func applyColumnConstraints(column string, field *Field) string {
 	if !field.Null {
 		column += " NOT NULL"
+	}
+	if field.Default != nil {
+		column += " DEFAULT " + fmt.Sprint(field.Default)
+	}
+	if field.Primary {
+		column += " PRIMARY KEY"
 	}
 	if field.Unique {
 		column += " UNIQUE"
@@ -196,7 +428,7 @@ func applyColumnConstraints(column string, field *Field) string {
 	return column
 }
 
-func mapPostgresType(fieldType FieldType) string {
+func mapPostgresType(fieldType FieldType, adapter Adapter) string {
 	switch fieldType {
 	case TypeString:
 		return "VARCHAR(255)"
@@ -213,9 +445,14 @@ func mapPostgresType(fieldType FieldType) string {
 	case TypeDecimal:
 		return "DECIMAL(18,2)"
 	case TypeJSON:
+		if pg, ok := adapter.(*PostgreSQLAdapter); ok {
+			return pg.PostgresJSONType()
+		}
 		return "JSONB"
 	case TypeArray:
 		return "TEXT"
+	case TypeLocation:
+		return "POINT"
 	default:
 		return "TEXT"
 	}
@@ -241,6 +478,8 @@ func mapMySQLType(fieldType FieldType) string {
 		return "JSON"
 	case TypeArray:
 		return "TEXT"
+	case TypeLocation:
+		return "POINT"
 	default:
 		return "TEXT"
 	}
@@ -265,6 +504,8 @@ func mapSQLiteType(fieldType FieldType) string {
 	case TypeJSON:
 		return "TEXT"
 	case TypeArray:
+		return "TEXT"
+	case TypeLocation:
 		return "TEXT"
 	default:
 		return "TEXT"
@@ -291,6 +532,8 @@ func mapSQLServerType(fieldType FieldType) string {
 		return "NVARCHAR(MAX)"
 	case TypeArray:
 		return "NVARCHAR(MAX)"
+	case TypeLocation:
+		return "GEOGRAPHY"
 	default:
 		return "NVARCHAR(MAX)"
 	}
@@ -299,9 +542,9 @@ func mapSQLServerType(fieldType FieldType) string {
 // RawSQLMigration 原始 SQL 迁移
 type RawSQLMigration struct {
 	*BaseMigration
-	upSQL    []string
-	downSQL  []string
-	adapter  string // 可选：指定特定的 adapter
+	upSQL   []string
+	downSQL []string
+	adapter string // 可选：指定特定的 adapter
 }
 
 // NewRawSQLMigration 创建原始 SQL 迁移
@@ -376,32 +619,32 @@ func (r *MigrationRunner) Up(ctx context.Context) error {
 	if err := r.ensureMigrationTable(ctx); err != nil {
 		return err
 	}
-	
+
 	// 获取已执行的迁移
 	executed, err := r.getExecutedMigrations(ctx)
 	if err != nil {
 		return err
 	}
-	
+
 	// 执行未执行的迁移
 	for _, migration := range r.migrations {
 		version := migration.Version()
 		if _, exists := executed[version]; !exists {
 			fmt.Printf("Running migration %s: %s\n", version, migration.Description())
-			
+
 			if err := migration.Up(ctx, r.repo); err != nil {
 				return fmt.Errorf("migration %s failed: %w", version, err)
 			}
-			
+
 			// 记录迁移
 			if err := r.recordMigration(ctx, version); err != nil {
 				return fmt.Errorf("failed to record migration %s: %w", version, err)
 			}
-			
+
 			fmt.Printf("✓ Migration %s completed\n", version)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -412,11 +655,11 @@ func (r *MigrationRunner) Down(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	
+
 	if lastVersion == "" {
 		return fmt.Errorf("no migrations to rollback")
 	}
-	
+
 	// 找到对应的迁移
 	var targetMigration MigrationInterface
 	for _, migration := range r.migrations {
@@ -425,25 +668,25 @@ func (r *MigrationRunner) Down(ctx context.Context) error {
 			break
 		}
 	}
-	
+
 	if targetMigration == nil {
 		return fmt.Errorf("migration %s not found in registered migrations", lastVersion)
 	}
-	
+
 	fmt.Printf("Rolling back migration %s: %s\n", lastVersion, targetMigration.Description())
-	
+
 	// 执行回滚
 	if err := targetMigration.Down(ctx, r.repo); err != nil {
 		return fmt.Errorf("rollback failed: %w", err)
 	}
-	
+
 	// 删除迁移记录
 	if err := r.removeMigrationRecord(ctx, lastVersion); err != nil {
 		return fmt.Errorf("failed to remove migration record: %w", err)
 	}
-	
+
 	fmt.Printf("✓ Migration %s rolled back\n", lastVersion)
-	
+
 	return nil
 }
 
@@ -452,12 +695,12 @@ func (r *MigrationRunner) Status(ctx context.Context) ([]MigrationStatus, error)
 	if err := r.ensureMigrationTable(ctx); err != nil {
 		return nil, err
 	}
-	
+
 	executed, err := r.getExecutedMigrations(ctx)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	statuses := make([]MigrationStatus, 0, len(r.migrations))
 	for _, migration := range r.migrations {
 		version := migration.Version()
@@ -466,15 +709,15 @@ func (r *MigrationRunner) Status(ctx context.Context) ([]MigrationStatus, error)
 			Description: migration.Description(),
 			Applied:     false,
 		}
-		
+
 		if appliedAt, exists := executed[version]; exists {
 			status.Applied = true
 			status.AppliedAt = appliedAt
 		}
-		
+
 		statuses = append(statuses, status)
 	}
-	
+
 	return statuses, nil
 }
 
@@ -488,25 +731,19 @@ type MigrationStatus struct {
 
 // ensureMigrationTable 确保迁移表存在
 func (r *MigrationRunner) ensureMigrationTable(ctx context.Context) error {
-	sql := `
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version VARCHAR(255) PRIMARY KEY,
-    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)`
-	_, err := r.repo.Exec(ctx, sql)
-	return err
+	return ensureFrameworkTableUsingSchema(ctx, r.repo, buildSchemaMigrationsSchemaV2())
 }
 
 // getExecutedMigrations 获取已执行的迁移
 func (r *MigrationRunner) getExecutedMigrations(ctx context.Context) (map[string]time.Time, error) {
 	sql := "SELECT version, applied_at FROM schema_migrations ORDER BY version"
-	
+
 	rows, err := r.repo.Query(ctx, sql)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	executed := make(map[string]time.Time)
 	for rows.Next() {
 		var version string
@@ -516,20 +753,20 @@ func (r *MigrationRunner) getExecutedMigrations(ctx context.Context) (map[string
 		}
 		executed[version] = appliedAt
 	}
-	
+
 	return executed, rows.Err()
 }
 
 // getLastExecutedVersion 获取最后执行的迁移版本
 func (r *MigrationRunner) getLastExecutedVersion(ctx context.Context) (string, error) {
 	sql := "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-	
+
 	rows, err := r.repo.Query(ctx, sql)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
-	
+
 	if rows.Next() {
 		var version string
 		if err := rows.Scan(&version); err != nil {
@@ -537,14 +774,14 @@ func (r *MigrationRunner) getLastExecutedVersion(ctx context.Context) (string, e
 		}
 		return version, nil
 	}
-	
+
 	return "", nil
 }
 
 // recordMigration 记录迁移
 func (r *MigrationRunner) recordMigration(ctx context.Context, version string) error {
-	sql := "INSERT INTO schema_migrations (version) VALUES (?)"
-	_, err := r.repo.Exec(ctx, sql, version)
+	sql := "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
+	_, err := r.repo.Exec(ctx, sql, version, time.Now())
 	return err
 }
 
@@ -553,4 +790,124 @@ func (r *MigrationRunner) removeMigrationRecord(ctx context.Context, version str
 	sql := "DELETE FROM schema_migrations WHERE version = ?"
 	_, err := r.repo.Exec(ctx, sql, version)
 	return err
+}
+
+// ==================== FK ViewHint 视图 DDL 辅助函数 ====================
+
+// deriveViewAlias 从表名推导简短别名，用于视图 SELECT 子句中区分两张表的列。
+// 例如：users → u，order_items → oi，user_profiles → up。
+func deriveViewAlias(tableName string) string {
+	// 取 "." 后的最后一段（去除 schema 前缀）
+	parts := strings.Split(tableName, ".")
+	base := strings.Trim(parts[len(parts)-1], `"[]`+"`")
+	if base == "" {
+		return "t"
+	}
+	// 按 '_' 分词，取每个词的首字母
+	words := strings.Split(base, "_")
+	var result strings.Builder
+	for _, w := range words {
+		if len(w) > 0 {
+			result.WriteByte(w[0])
+		}
+	}
+	if result.Len() == 0 {
+		return "t"
+	}
+	return result.String()
+}
+
+// buildViewFromFKHintSQL 根据外键约束上的 ViewHint 生成 CREATE VIEW SQL。
+func buildViewFromFKHintSQL(repo *Repository, localTable string, fk TableConstraint) (string, error) {
+	hint := fk.ViewHint
+	viewName := hint.ViewName
+	if viewName == "" {
+		viewName = localTable + "_" + fk.RefTable + "_view"
+	}
+	if len(fk.Fields) == 0 || len(fk.RefFields) == 0 {
+		return "", fmt.Errorf("FK %s: Fields or RefFields must not be empty", fk.Name)
+	}
+
+	dialect := resolveMigrationDialect(repo)
+	adapter := repo.GetAdapter()
+
+	localAlias := deriveViewAlias(localTable)
+	refAlias := deriveViewAlias(fk.RefTable)
+	if localAlias == refAlias {
+		refAlias = refAlias + "2"
+	}
+
+	// SELECT 列
+	var selectCols string
+	if len(hint.Columns) > 0 {
+		selectCols = strings.Join(hint.Columns, ", ")
+	} else {
+		selectCols = localAlias + ".*, " + refAlias + ".*"
+	}
+
+	// JOIN 类型
+	joinType := "INNER"
+	if hint.JoinType != "" {
+		joinType = strings.ToUpper(strings.TrimSpace(hint.JoinType))
+	}
+
+	// ON 条件
+	onParts := make([]string, 0, len(fk.Fields))
+	for i, localField := range fk.Fields {
+		refField := localField
+		if i < len(fk.RefFields) {
+			refField = fk.RefFields[i]
+		}
+		onParts = append(onParts, localAlias+"."+localField+" = "+refAlias+"."+refField)
+	}
+	onClause := strings.Join(onParts, " AND ")
+
+	qLocalTable := dialect.QuoteIdentifier(localTable)
+	qRefTable := dialect.QuoteIdentifier(fk.RefTable)
+	qViewName := dialect.QuoteIdentifier(viewName)
+
+	selectSQL := fmt.Sprintf("SELECT %s FROM %s %s %s JOIN %s %s ON %s",
+		selectCols,
+		qLocalTable, localAlias,
+		joinType,
+		qRefTable, refAlias,
+		onClause,
+	)
+
+	switch adapter.(type) {
+	case *PostgreSQLAdapter:
+		if hint.Materialized {
+			return fmt.Sprintf("CREATE MATERIALIZED VIEW IF NOT EXISTS %s AS %s", qViewName, selectSQL), nil
+		}
+		return fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s", qViewName, selectSQL), nil
+	case *SQLServerAdapter:
+		// SQL Server 不支持 CREATE OR REPLACE，使用 CREATE OR ALTER
+		// Indexed View 限制过多，此处统一创建普通视图
+		return fmt.Sprintf("CREATE OR ALTER VIEW %s AS %s", qViewName, selectSQL), nil
+	case *MySQLAdapter:
+		return fmt.Sprintf("CREATE OR REPLACE VIEW %s AS %s", qViewName, selectSQL), nil
+	default:
+		// SQLite 及其他
+		return fmt.Sprintf("CREATE VIEW IF NOT EXISTS %s AS %s", qViewName, selectSQL), nil
+	}
+}
+
+// buildDropViewSQL 生成删除视图的 SQL。
+func buildDropViewSQL(repo *Repository, viewName string, materialized bool) string {
+	adapter := repo.GetAdapter()
+	dialect := resolveMigrationDialect(repo)
+	qViewName := dialect.QuoteIdentifier(viewName)
+
+	switch adapter.(type) {
+	case *PostgreSQLAdapter:
+		if materialized {
+			return fmt.Sprintf("DROP MATERIALIZED VIEW IF EXISTS %s", qViewName)
+		}
+		return fmt.Sprintf("DROP VIEW IF EXISTS %s", qViewName)
+	case *SQLServerAdapter:
+		// SQL Server 2014 不支持 DROP VIEW IF EXISTS，兼容处理
+		return fmt.Sprintf("IF OBJECT_ID('%s', 'V') IS NOT NULL DROP VIEW %s", viewName, qViewName)
+	default:
+		return fmt.Sprintf("DROP VIEW IF EXISTS %s", qViewName)
+	}
 }

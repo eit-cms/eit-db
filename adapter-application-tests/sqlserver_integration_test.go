@@ -9,13 +9,19 @@ import (
 )
 
 func setupSQLServerRepo(t *testing.T) (*db.Repository, func()) {
-	config := &db.Config{
-		Adapter:  "sqlserver",
-		Host:     getEnv("SQLSERVER_HOST", "localhost"),
-		Port:     getEnvInt("SQLSERVER_PORT", 1433),
-		Username: getEnv("SQLSERVER_USER", "sa"),
-		Password: getEnv("SQLSERVER_PASSWORD", "Test@1234"),
-		Database: getEnv("SQLSERVER_DB", "testdb"),
+	config, err := db.LoadConfigFromEnvWithDefaults("sqlserver", &db.Config{
+		Adapter: "sqlserver",
+		SQLServer: &db.SQLServerConnectionConfig{
+			Host:     "localhost",
+			Port:     1433,
+			Username: "sa",
+			Password: "Test@1234",
+			Database: "testdb",
+		},
+	})
+	if err != nil {
+		t.Skipf("SQL Server 配置无效: %v", err)
+		return nil, nil
 	}
 
 	if err := ensureSQLServerDatabase(config); err != nil {
@@ -43,7 +49,9 @@ func setupSQLServerRepo(t *testing.T) (*db.Repository, func()) {
 
 func ensureSQLServerDatabase(config *db.Config) error {
 	masterConfig := *config
-	masterConfig.Database = "master"
+	masterResolved := masterConfig.ResolvedSQLServerConfig()
+	masterResolved.Database = "master"
+	masterConfig.SQLServer = masterResolved
 
 	repo, err := db.NewRepository(&masterConfig)
 	if err != nil {
@@ -56,7 +64,8 @@ func ensureSQLServerDatabase(config *db.Config) error {
 		return err
 	}
 
-	createSQL := fmt.Sprintf("IF DB_ID('%s') IS NULL CREATE DATABASE [%s]", config.Database, config.Database)
+	resolved := config.ResolvedSQLServerConfig()
+	createSQL := fmt.Sprintf("IF DB_ID('%s') IS NULL CREATE DATABASE [%s]", resolved.Database, resolved.Database)
 	_, err = repo.Exec(ctx, createSQL)
 	return err
 }
@@ -112,4 +121,3 @@ func TestSQLServerSchemaMigration(t *testing.T) {
 		t.Fatalf("表已删除，预期查询失败")
 	}
 }
-

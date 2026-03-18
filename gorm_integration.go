@@ -9,32 +9,8 @@ import (
 )
 
 // GetGormDB 从 Repository 获取 GORM 实例
-// 用于保持与现有 GORM 代码的兼容性
+// Deprecated: 为了保持 Adapter 与 ORM 解耦，此方法始终返回 nil。
 func (r *Repository) GetGormDB() *gorm.DB {
-	if r.adapter == nil {
-		return nil
-	}
-
-	// 尝试从不同类型的adapter中提取GORM实例
-	switch a := r.adapter.(type) {
-	case *MySQLAdapter:
-		if a != nil {
-			return a.db
-		}
-	case *PostgreSQLAdapter:
-		if a != nil {
-			return a.db
-		}
-	case *SQLiteAdapter:
-		if a != nil {
-			return a.db
-		}
-	case *gormAdapter:
-		if a != nil {
-			return a.db
-		}
-	}
-
 	return nil
 }
 
@@ -93,7 +69,8 @@ func (a *gormAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, error
 }
 
 func (a *gormAdapter) GetRawConn() interface{} {
-	return a.db
+	// Adapter 层不暴露 ORM 连接。
+	return nil
 }
 
 func (a *gormAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
@@ -116,39 +93,41 @@ func (a *gormAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	// GORM adapter 默认返回 MySQL 特性（最安全的默认值）
 	// 实际应根据 GORM 的底层驱动类型返回相应特性
 	return &DatabaseFeatures{
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   false,
-		SupportsDeferrable:       false,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       false,
+		SupportsDeferrable:           false,
+
 		SupportsEnumType:      true,
 		SupportsCompositeType: false,
 		SupportsDomainType:    false,
 		SupportsUDT:           false,
-		
+
 		SupportsStoredProcedures: true,
 		SupportsFunctions:        true,
 		SupportsAggregateFuncs:   false,
 		FunctionLanguages:        []string{"sql"},
-		
+
 		SupportsWindowFunctions: true,
 		SupportsCTE:             true,
 		SupportsRecursiveCTE:    true,
 		SupportsMaterializedCTE: false,
-		
+
 		HasNativeJSON:     true,
 		SupportsJSONPath:  true,
 		SupportsJSONIndex: true,
-		
+
 		SupportsFullTextSearch: true,
 		FullTextLanguages:      []string{"english"},
-		
+
 		SupportsArrays:       false,
 		SupportsGenerated:    true,
 		SupportsReturning:    false,
 		SupportsUpsert:       true,
 		SupportsListenNotify: false,
-		
+
 		DatabaseName:    "GORM (MySQL-compatible)",
 		DatabaseVersion: "Unknown",
 		Description:     "GORM ORM adapter with MySQL-compatible feature set",
@@ -205,4 +184,3 @@ func (r *gormResult) LastInsertId() (int64, error) {
 func (r *gormResult) RowsAffected() (int64, error) {
 	return r.rows, nil
 }
-

@@ -35,6 +35,8 @@ const (
 	QueryFallbackNone QueryFallbackStrategy = "none"
 	// 在应用层处理（客户端过滤/排序等）
 	QueryFallbackApplicationLayer QueryFallbackStrategy = "application_layer"
+	// 通过数据库自定义函数降级（如 SQLite 注册 JSON_EXTRACT_GO）
+	QueryFallbackCustomFunction QueryFallbackStrategy = "custom_function"
 	// 使用替代语法（例如 SQL Server vs PostgreSQL）
 	QueryFallbackAlternativeSyntax QueryFallbackStrategy = "alternative_syntax"
 	// 分解为多个简单查询
@@ -47,10 +49,10 @@ const (
 
 // QueryFeature 单个查询特性描述
 type QueryFeature struct {
-	Name      string                  // 特性名称（如 "IN_RANGE_QUERY"）
-	Supported bool                    // 是否支持
-	Fallback  QueryFallbackStrategy   // 不支持时的降级策略
-	Notes     string                  // 备注说明
+	Name        string                // 特性名称（如 "IN_RANGE_QUERY"）
+	Supported   bool                  // 是否支持
+	Fallback    QueryFallbackStrategy // 不支持时的降级策略
+	Notes       string                // 备注说明
 	SQLExamples map[string]string     // 各数据库的 SQL 示例 (数据库名 => SQL)
 }
 
@@ -66,81 +68,81 @@ type FeatureSupport struct {
 // QueryFeatures 数据库查询特性集合
 type QueryFeatures struct {
 	// 基础查询特性
-	SupportsIN            bool   // IN (value1, value2, ...) 范围查询
-	SupportsNotIN         bool   // NOT IN 查询
-	SupportsBetween       bool   // BETWEEN 查询
-	SupportsLike          bool   // LIKE 模式匹配
-	SupportsDistinct      bool   // DISTINCT 去重
-	SupportsGroupBy       bool   // GROUP BY 分组
-	SupportsHaving        bool   // HAVING 条件过滤
+	SupportsIN       bool // IN (value1, value2, ...) 范围查询
+	SupportsNotIN    bool // NOT IN 查询
+	SupportsBetween  bool // BETWEEN 查询
+	SupportsLike     bool // LIKE 模式匹配
+	SupportsDistinct bool // DISTINCT 去重
+	SupportsGroupBy  bool // GROUP BY 分组
+	SupportsHaving   bool // HAVING 条件过滤
 
 	// JOIN 操作
-	SupportsInnerJoin     bool   // INNER JOIN
-	SupportsLeftJoin      bool   // LEFT JOIN
-	SupportsRightJoin     bool   // RIGHT JOIN
-	SupportsCrossJoin     bool   // CROSS JOIN
-	SupportsFullOuterJoin bool   // FULL OUTER JOIN
-	SupportsSelfJoin      bool   // 自连接
+	SupportsInnerJoin     bool // INNER JOIN
+	SupportsLeftJoin      bool // LEFT JOIN
+	SupportsRightJoin     bool // RIGHT JOIN
+	SupportsCrossJoin     bool // CROSS JOIN
+	SupportsFullOuterJoin bool // FULL OUTER JOIN
+	SupportsSelfJoin      bool // 自连接
 
 	// 高级查询特性
-	SupportsCTE           bool   // 公用表表达式 (WITH ... AS)
-	SupportsRecursiveCTE  bool   // 递归 CTE
-	SupportsWindowFunc    bool   // 窗口函数 (ROW_NUMBER, RANK, etc)
-	SupportsSubquery      bool   // 子查询
+	SupportsCTE                bool // 公用表表达式 (WITH ... AS)
+	SupportsRecursiveCTE       bool // 递归 CTE
+	SupportsWindowFunc         bool // 窗口函数 (ROW_NUMBER, RANK, etc)
+	SupportsSubquery           bool // 子查询
 	SupportsCorrelatedSubquery bool // 关联子查询
-	SupportsUnion         bool   // UNION / UNION ALL
-	SupportsExcept        bool   // EXCEPT / MINUS
-	SupportsIntersect     bool   // INTERSECT
+	SupportsUnion              bool // UNION / UNION ALL
+	SupportsExcept             bool // EXCEPT / MINUS
+	SupportsIntersect          bool // INTERSECT
 
 	// 聚合和分析函数
 	SupportsOrderByInAggregate bool // 聚合函数中的 ORDER BY (如 STRING_AGG(...ORDER BY...))
-	SupportsArrayAggregate bool    // 数组聚合
-	SupportsStringAggregate bool   // 字符串聚合
+	SupportsArrayAggregate     bool // 数组聚合
+	SupportsStringAggregate    bool // 字符串聚合
 
 	// 文本搜索
-	SupportsFullTextSearch bool   // 全文搜索
-	SupportsRegexMatch     bool   // 正则表达式匹配
-	SupportsFuzzyMatch     bool   // 模糊匹配
+	SupportsFullTextSearch bool // 全文搜索
+	SupportsRegexMatch     bool // 正则表达式匹配
+	SupportsFuzzyMatch     bool // 模糊匹配
 
 	// JSON 操作
-	SupportsJSONPath       bool   // JSON 路径提取
-	SupportsJSONType       bool   // JSON 数据类型
-	SupportsJSONOperators  bool   // JSON 运算符
-	SupportsJSONAgg        bool   // JSON 聚合
+	SupportsJSONPath      bool // JSON 路径提取
+	SupportsJSONType      bool // JSON 数据类型
+	SupportsJSONOperators bool // JSON 运算符
+	SupportsJSONAgg       bool // JSON 聚合
 
 	// 案例表达式
-	SupportsCase           bool   // CASE WHEN THEN ELSE END
-	SupportsCaseWithElse   bool   // CASE 带 ELSE
+	SupportsCase         bool // CASE WHEN THEN ELSE END
+	SupportsCaseWithElse bool // CASE 带 ELSE
 
 	// 其他特性
-	SupportsLimit          bool   // LIMIT 限制行数
-	SupportsOffset         bool   // OFFSET 偏移
-	SupportsOrderBy        bool   // ORDER BY 排序
-	SupportsNulls          bool   // IS NULL / IS NOT NULL
-	SupportsCastType       bool   // CAST(...AS type)
-	SupportsCoalesce       bool   // COALESCE 函数
+	SupportsLimit    bool // LIMIT 限制行数
+	SupportsOffset   bool // OFFSET 偏移
+	SupportsOrderBy  bool // ORDER BY 排序
+	SupportsNulls    bool // IS NULL / IS NOT NULL
+	SupportsCastType bool // CAST(...AS type)
+	SupportsCoalesce bool // COALESCE 函数
 
 	// 特殊数据库特性
-	SupportsIfExists       bool   // IF EXISTS 子句
-	SupportsInsertIgnore   bool   // INSERT IGNORE (MySQL) 或 ON CONFLICT (PostgreSQL)
-	SupportsUpsert         bool   // INSERT ... ON DUPLICATE KEY UPDATE 或 ON CONFLICT
+	SupportsIfExists     bool // IF EXISTS 子句
+	SupportsInsertIgnore bool // INSERT IGNORE (MySQL) 或 ON CONFLICT (PostgreSQL)
+	SupportsUpsert       bool // INSERT ... ON DUPLICATE KEY UPDATE 或 ON CONFLICT
 
 	// ==================== VIEW 支持 ====================
-	SupportsView               bool   // 是否支持 VIEW
-	SupportsMaterializedView   bool   // 物化视图支持（如 PostgreSQL）
-	SupportsViewForPreload     bool   // 是否支持用 VIEW 实现 Preload 优化
+	SupportsView             bool // 是否支持 VIEW
+	SupportsMaterializedView bool // 物化视图支持（如 PostgreSQL）
+	SupportsViewForPreload   bool // 是否支持用 VIEW 实现 Preload 优化
 
 	// ==================== 多 Adapter 路由优化信息 ====================
 	// Search 操作优化
-	SearchOptimizationSupported    bool   // 该 adapter 是否支持 search
-	SearchOptimizationIsOptimal    bool   // 是否是 search 的最优 adapter
-	SearchOptimizationPriority     int    // 路由优先级 (1=最优, 2=次优, 3=备选)
+	SearchOptimizationSupported bool // 该 adapter 是否支持 search
+	SearchOptimizationIsOptimal bool // 是否是 search 的最优 adapter
+	SearchOptimizationPriority  int  // 路由优先级 (1=最优, 2=次优, 3=备选)
 
 	// Recursive 查询优化
-	RecursiveOptimizationSupported     bool   // 是否支持递归查询
-	RecursiveOptimizationIsOptimal     bool   // 是否是递归查询的最优 adapter
-	RecursiveOptimizationPriority      int    // 路由优先级
-	RecursiveOptimizationHasNativeSyntax bool  // 是否有原生递归语法（否则需要补偿）
+	RecursiveOptimizationSupported       bool // 是否支持递归查询
+	RecursiveOptimizationIsOptimal       bool // 是否是递归查询的最优 adapter
+	RecursiveOptimizationPriority        int  // 路由优先级
+	RecursiveOptimizationHasNativeSyntax bool // 是否有原生递归语法（否则需要补偿）
 
 	// Adapter 功能标签
 	AdapterTags []string // 功能标签，如 ["text_search", "graph", "relational", "time_series"]
@@ -165,13 +167,13 @@ type QueryFeatures struct {
 func NewPostgreSQLQueryFeatures() *QueryFeatures {
 	return &QueryFeatures{
 		// 基础特性 - 全部支持
-		SupportsIN:            true,
-		SupportsNotIN:         true,
-		SupportsBetween:       true,
-		SupportsLike:          true,
-		SupportsDistinct:      true,
-		SupportsGroupBy:       true,
-		SupportsHaving:        true,
+		SupportsIN:       true,
+		SupportsNotIN:    true,
+		SupportsBetween:  true,
+		SupportsLike:     true,
+		SupportsDistinct: true,
+		SupportsGroupBy:  true,
+		SupportsHaving:   true,
 
 		// JOIN 操作 - 全部支持
 		SupportsInnerJoin:     true,
@@ -182,14 +184,14 @@ func NewPostgreSQLQueryFeatures() *QueryFeatures {
 		SupportsSelfJoin:      true,
 
 		// 高级特性 - 全部支持
-		SupportsCTE:           true,
-		SupportsRecursiveCTE:  true,
-		SupportsWindowFunc:    true,
-		SupportsSubquery:      true,
+		SupportsCTE:                true,
+		SupportsRecursiveCTE:       true,
+		SupportsWindowFunc:         true,
+		SupportsSubquery:           true,
 		SupportsCorrelatedSubquery: true,
-		SupportsUnion:         true,
-		SupportsExcept:        true,
-		SupportsIntersect:     true,
+		SupportsUnion:              true,
+		SupportsExcept:             true,
+		SupportsIntersect:          true,
 
 		// 聚合 - 全部支持
 		SupportsOrderByInAggregate: true,
@@ -197,41 +199,41 @@ func NewPostgreSQLQueryFeatures() *QueryFeatures {
 		SupportsStringAggregate:    true,
 
 		// 文本搜索 - 全部支持
-		SupportsFullTextSearch:     true,
-		SupportsRegexMatch:         true,
-		SupportsFuzzyMatch:         true,
+		SupportsFullTextSearch: true,
+		SupportsRegexMatch:     true,
+		SupportsFuzzyMatch:     true,
 
 		// JSON - 全部支持
-		SupportsJSONPath:       true,
-		SupportsJSONType:       true,
-		SupportsJSONOperators:  true,
-		SupportsJSONAgg:        true,
+		SupportsJSONPath:      true,
+		SupportsJSONType:      true,
+		SupportsJSONOperators: true,
+		SupportsJSONAgg:       true,
 
 		// 其他 - 全部支持
-		SupportsCase:           true,
-		SupportsCaseWithElse:   true,
-		SupportsLimit:          true,
-		SupportsOffset:         true,
-		SupportsOrderBy:        true,
-		SupportsNulls:          true,
-		SupportsCastType:       true,
-		SupportsCoalesce:       true,
-		SupportsIfExists:       true,
-		SupportsInsertIgnore:   true,
-		SupportsUpsert:         true,
+		SupportsCase:         true,
+		SupportsCaseWithElse: true,
+		SupportsLimit:        true,
+		SupportsOffset:       true,
+		SupportsOrderBy:      true,
+		SupportsNulls:        true,
+		SupportsCastType:     true,
+		SupportsCoalesce:     true,
+		SupportsIfExists:     true,
+		SupportsInsertIgnore: true,
+		SupportsUpsert:       true,
 
 		// VIEW 支持
-		SupportsView:               true,
-		SupportsMaterializedView:   true,  // PostgreSQL 支持物化视图
-		SupportsViewForPreload:     true,  // 可用于 Preload 优化
+		SupportsView:             true,
+		SupportsMaterializedView: true, // PostgreSQL 支持物化视图
+		SupportsViewForPreload:   true, // 可用于 Preload 优化
 
 		// 多 Adapter 优化
-		SearchOptimizationSupported:    true,
-		SearchOptimizationIsOptimal:    false,
-		SearchOptimizationPriority:     2,
-		RecursiveOptimizationSupported:     true,
-		RecursiveOptimizationIsOptimal:     false,
-		RecursiveOptimizationPriority:      2,
+		SearchOptimizationSupported:          true,
+		SearchOptimizationIsOptimal:          false,
+		SearchOptimizationPriority:           2,
+		RecursiveOptimizationSupported:       true,
+		RecursiveOptimizationIsOptimal:       false,
+		RecursiveOptimizationPriority:        2,
 		RecursiveOptimizationHasNativeSyntax: true,
 
 		AdapterTags: []string{"relational", "full_text_search", "json", "array"},
@@ -242,12 +244,12 @@ func NewPostgreSQLQueryFeatures() *QueryFeatures {
 
 		FallbackStrategies: map[string]QueryFallbackStrategy{},
 		FeatureNotes: map[string]string{
-			"recursive_cte": "支持 WITH RECURSIVE",
-			"window_func": "支持 OVER() 子句和所有窗口函数",
+			"recursive_cte":   "支持 WITH RECURSIVE",
+			"window_func":     "支持 OVER() 子句和所有窗口函数",
 			"array_aggregate": "支持 ARRAY_AGG() 聚合",
 		},
 		AlternativeSyntax: map[string]string{},
-		FeatureSupport: map[string]FeatureSupport{},
+		FeatureSupport:    map[string]FeatureSupport{},
 	}
 }
 
@@ -255,13 +257,13 @@ func NewPostgreSQLQueryFeatures() *QueryFeatures {
 func NewMySQLQueryFeatures() *QueryFeatures {
 	return &QueryFeatures{
 		// 基础特性 - 全部支持
-		SupportsIN:            true,
-		SupportsNotIN:         true,
-		SupportsBetween:       true,
-		SupportsLike:          true,
-		SupportsDistinct:      true,
-		SupportsGroupBy:       true,
-		SupportsHaving:        true,
+		SupportsIN:       true,
+		SupportsNotIN:    true,
+		SupportsBetween:  true,
+		SupportsLike:     true,
+		SupportsDistinct: true,
+		SupportsGroupBy:  true,
+		SupportsHaving:   true,
 
 		// JOIN 操作 - 全部支持
 		SupportsInnerJoin:     true,
@@ -272,14 +274,14 @@ func NewMySQLQueryFeatures() *QueryFeatures {
 		SupportsSelfJoin:      true,
 
 		// 高级特性
-		SupportsCTE:           true,  // ✅ MySQL 8.0+ 支持
-		SupportsRecursiveCTE:  true,  // ✅ MySQL 8.0+ 支持
-		SupportsWindowFunc:    true,  // ✅ MySQL 8.0+ 支持
-		SupportsSubquery:      true,
+		SupportsCTE:                true, // ✅ MySQL 8.0+ 支持
+		SupportsRecursiveCTE:       true, // ✅ MySQL 8.0+ 支持
+		SupportsWindowFunc:         true, // ✅ MySQL 8.0+ 支持
+		SupportsSubquery:           true,
 		SupportsCorrelatedSubquery: true,
-		SupportsUnion:         true,
-		SupportsExcept:        false, // ❌ MySQL 不支持 EXCEPT
-		SupportsIntersect:     false, // ❌ MySQL 不支持 INTERSECT
+		SupportsUnion:              true,
+		SupportsExcept:             false, // ❌ MySQL 不支持 EXCEPT
+		SupportsIntersect:          false, // ❌ MySQL 不支持 INTERSECT
 
 		// 聚合
 		SupportsOrderByInAggregate: false, // ❌ MySQL 不支持聚合函数中的 ORDER BY
@@ -287,41 +289,41 @@ func NewMySQLQueryFeatures() *QueryFeatures {
 		SupportsStringAggregate:    true,  // ✅ GROUP_CONCAT()
 
 		// 文本搜索
-		SupportsFullTextSearch:     true,
-		SupportsRegexMatch:         true,
-		SupportsFuzzyMatch:         false, // ❌ MySQL 不原生支持模糊匹配
+		SupportsFullTextSearch: true,
+		SupportsRegexMatch:     true,
+		SupportsFuzzyMatch:     false, // ❌ MySQL 不原生支持模糊匹配
 
 		// JSON - MySQL 5.7+ 支持
-		SupportsJSONPath:       true,
-		SupportsJSONType:       true,
-		SupportsJSONOperators:  true,
-		SupportsJSONAgg:        true,  // ✅ MySQL 5.7+
+		SupportsJSONPath:      true,
+		SupportsJSONType:      true,
+		SupportsJSONOperators: true,
+		SupportsJSONAgg:       true, // ✅ MySQL 5.7+
 
 		// 其他
-		SupportsCase:           true,
-		SupportsCaseWithElse:   true,
-		SupportsLimit:          true,
-		SupportsOffset:         true,
-		SupportsOrderBy:        true,
-		SupportsNulls:          true,
-		SupportsCastType:       true,
-		SupportsCoalesce:       true,
-		SupportsIfExists:       true,
-		SupportsInsertIgnore:   true,  // ✅ INSERT IGNORE
-		SupportsUpsert:         true,  // ✅ INSERT ... ON DUPLICATE KEY UPDATE
+		SupportsCase:         true,
+		SupportsCaseWithElse: true,
+		SupportsLimit:        true,
+		SupportsOffset:       true,
+		SupportsOrderBy:      true,
+		SupportsNulls:        true,
+		SupportsCastType:     true,
+		SupportsCoalesce:     true,
+		SupportsIfExists:     true,
+		SupportsInsertIgnore: true, // ✅ INSERT IGNORE
+		SupportsUpsert:       true, // ✅ INSERT ... ON DUPLICATE KEY UPDATE
 
 		// VIEW 支持
-		SupportsView:               true,
-		SupportsMaterializedView:   false,
-		SupportsViewForPreload:     true,  // 可用于简单的 Preload
+		SupportsView:             true,
+		SupportsMaterializedView: false,
+		SupportsViewForPreload:   true, // 可用于简单的 Preload
 
 		// 多 Adapter 优化
-		SearchOptimizationSupported:    true,
-		SearchOptimizationIsOptimal:    false,
-		SearchOptimizationPriority:     3,
-		RecursiveOptimizationSupported:     true,
-		RecursiveOptimizationIsOptimal:     false,
-		RecursiveOptimizationPriority:      3,
+		SearchOptimizationSupported:          true,
+		SearchOptimizationIsOptimal:          false,
+		SearchOptimizationPriority:           3,
+		RecursiveOptimizationSupported:       true,
+		RecursiveOptimizationIsOptimal:       false,
+		RecursiveOptimizationPriority:        3,
 		RecursiveOptimizationHasNativeSyntax: true, // MySQL 8.0+ WITH RECURSIVE
 
 		AdapterTags: []string{"relational", "full_text_search"},
@@ -331,29 +333,29 @@ func NewMySQLQueryFeatures() *QueryFeatures {
 		},
 
 		FallbackStrategies: map[string]QueryFallbackStrategy{
-			"full_outer_join":           QueryFallbackMultiQuery,    // 用 LEFT JOIN + RIGHT JOIN + UNION
-			"except":                    QueryFallbackMultiQuery,    // 用 NOT IN 或 NOT EXISTS
-			"intersect":                 QueryFallbackAlternativeSyntax, // 用 INNER JOIN
-			"order_by_in_aggregate":     QueryFallbackApplicationLayer,
+			"full_outer_join":       QueryFallbackMultiQuery,        // 用 LEFT JOIN + RIGHT JOIN + UNION
+			"except":                QueryFallbackMultiQuery,        // 用 NOT IN 或 NOT EXISTS
+			"intersect":             QueryFallbackAlternativeSyntax, // 用 INNER JOIN
+			"order_by_in_aggregate": QueryFallbackApplicationLayer,
 		},
 		FeatureNotes: map[string]string{
-			"full_outer_join": "MySQL 不支持，可用 LEFT JOIN ... UNION ... RIGHT JOIN 模拟",
-			"except": "MySQL 不支持，可用 NOT IN 或 NOT EXISTS",
-			"recursive_cte": "MySQL 8.0+ 支持",
-			"window_func": "MySQL 8.0+ 支持",
+			"full_outer_join":       "MySQL 不支持，可用 LEFT JOIN ... UNION ... RIGHT JOIN 模拟",
+			"except":                "MySQL 不支持，可用 NOT IN 或 NOT EXISTS",
+			"recursive_cte":         "MySQL 8.0+ 支持",
+			"window_func":           "MySQL 8.0+ 支持",
 			"order_by_in_aggregate": "MySQL 不支持聚合函数中的 ORDER BY",
 		},
 		AlternativeSyntax: map[string]string{
 			"full_outer_join": "SELECT ... FROM a LEFT JOIN b ... UNION SELECT ... FROM a RIGHT JOIN b ...",
-			"upsert": "INSERT INTO table (...) VALUES (...) ON DUPLICATE KEY UPDATE ...",
+			"upsert":          "INSERT INTO table (...) VALUES (...) ON DUPLICATE KEY UPDATE ...",
 		},
 		FeatureSupport: map[string]FeatureSupport{
-			"cte": {Supported: true, MinVersion: "8.0"},
+			"cte":           {Supported: true, MinVersion: "8.0"},
 			"recursive_cte": {Supported: true, MinVersion: "8.0"},
-			"window_func": {Supported: true, MinVersion: "8.0"},
-			"json_path": {Supported: true, MinVersion: "5.7"},
-			"json_type": {Supported: true, MinVersion: "5.7"},
-			"json_agg": {Supported: true, MinVersion: "5.7"},
+			"window_func":   {Supported: true, MinVersion: "8.0"},
+			"json_path":     {Supported: true, MinVersion: "5.7"},
+			"json_type":     {Supported: true, MinVersion: "5.7"},
+			"json_agg":      {Supported: true, MinVersion: "5.7"},
 		},
 	}
 }
@@ -362,13 +364,13 @@ func NewMySQLQueryFeatures() *QueryFeatures {
 func NewSQLiteQueryFeatures() *QueryFeatures {
 	return &QueryFeatures{
 		// 基础特性 - 全部支持
-		SupportsIN:            true,
-		SupportsNotIN:         true,
-		SupportsBetween:       true,
-		SupportsLike:          true,
-		SupportsDistinct:      true,
-		SupportsGroupBy:       true,
-		SupportsHaving:        true,
+		SupportsIN:       true,
+		SupportsNotIN:    true,
+		SupportsBetween:  true,
+		SupportsLike:     true,
+		SupportsDistinct: true,
+		SupportsGroupBy:  true,
+		SupportsHaving:   true,
 
 		// JOIN 操作 - 全部支持
 		SupportsInnerJoin:     true,
@@ -379,14 +381,14 @@ func NewSQLiteQueryFeatures() *QueryFeatures {
 		SupportsSelfJoin:      true,
 
 		// 高级特性
-		SupportsCTE:           true,  // ✅ SQLite 3.8.4+ 支持
-		SupportsRecursiveCTE:  true,  // ✅ SQLite 3.8.4+ 支持
-		SupportsWindowFunc:    true,  // ✅ SQLite 3.25.0+ 支持
-		SupportsSubquery:      true,
+		SupportsCTE:                true, // ✅ SQLite 3.8.4+ 支持
+		SupportsRecursiveCTE:       true, // ✅ SQLite 3.8.4+ 支持
+		SupportsWindowFunc:         true, // ✅ SQLite 3.25.0+ 支持
+		SupportsSubquery:           true,
 		SupportsCorrelatedSubquery: true,
-		SupportsUnion:         true,
-		SupportsExcept:        true,  // ✅ EXCEPT
-		SupportsIntersect:     true,  // ✅ INTERSECT
+		SupportsUnion:              true,
+		SupportsExcept:             true, // ✅ EXCEPT
+		SupportsIntersect:          true, // ✅ INTERSECT
 
 		// 聚合
 		SupportsOrderByInAggregate: true,  // ✅ SQLite 3.30+ 支持 ORDER BY in aggregate
@@ -394,41 +396,41 @@ func NewSQLiteQueryFeatures() *QueryFeatures {
 		SupportsStringAggregate:    true,  // ✅ GROUP_CONCAT()
 
 		// 文本搜索
-		SupportsFullTextSearch:     false, // ❌ 需要 FTS 扩展
-		SupportsRegexMatch:         false, // ❌ 需要 REGEXP 函数注册
-		SupportsFuzzyMatch:         false, // ❌ 不支持
+		SupportsFullTextSearch: false, // ❌ 需要 FTS 扩展
+		SupportsRegexMatch:     false, // ❌ 需要 REGEXP 函数注册
+		SupportsFuzzyMatch:     false, // ❌ 不支持
 
 		// JSON
-		SupportsJSONPath:       true,  // ✅ SQLite 3.9.0+
-		SupportsJSONType:       false, // ❌ 文本存储
-		SupportsJSONOperators:  true,  // ✅ JSON 函数
-		SupportsJSONAgg:        true,  // ✅ JSON_GROUP_ARRAY()
+		SupportsJSONPath:      true,  // ✅ SQLite 3.9.0+ (JSON1); 缺失时可降级到自定义函数
+		SupportsJSONType:      false, // ❌ 文本存储
+		SupportsJSONOperators: true,  // ✅ JSON 函数
+		SupportsJSONAgg:       true,  // ✅ JSON_GROUP_ARRAY()
 
 		// 其他
-		SupportsCase:           true,
-		SupportsCaseWithElse:   true,
-		SupportsLimit:          true,
-		SupportsOffset:         true,
-		SupportsOrderBy:        true,
-		SupportsNulls:          true,
-		SupportsCastType:       true,
-		SupportsCoalesce:       true,
-		SupportsIfExists:       true,
-		SupportsInsertIgnore:   false, // ❌ 用 INSERT OR IGNORE
-		SupportsUpsert:         true,  // ✅ INSERT ... ON CONFLICT
+		SupportsCase:         true,
+		SupportsCaseWithElse: true,
+		SupportsLimit:        true,
+		SupportsOffset:       true,
+		SupportsOrderBy:      true,
+		SupportsNulls:        true,
+		SupportsCastType:     true,
+		SupportsCoalesce:     true,
+		SupportsIfExists:     true,
+		SupportsInsertIgnore: false, // ❌ 用 INSERT OR IGNORE
+		SupportsUpsert:       true,  // ✅ INSERT ... ON CONFLICT
 
 		// VIEW 支持
-		SupportsView:               true,
-		SupportsMaterializedView:   false,
-		SupportsViewForPreload:     true,  // 可用于简单的 Preload
+		SupportsView:             true,
+		SupportsMaterializedView: false,
+		SupportsViewForPreload:   true, // 可用于简单的 Preload
 
 		// 多 Adapter 优化
-		SearchOptimizationSupported:    false, // FTS 需要扩展
-		SearchOptimizationIsOptimal:    false,
-		SearchOptimizationPriority:     4,
-		RecursiveOptimizationSupported:     true,
-		RecursiveOptimizationIsOptimal:     false,
-		RecursiveOptimizationPriority:      4,
+		SearchOptimizationSupported:          false, // FTS 需要扩展
+		SearchOptimizationIsOptimal:          false,
+		SearchOptimizationPriority:           4,
+		RecursiveOptimizationSupported:       true,
+		RecursiveOptimizationIsOptimal:       false,
+		RecursiveOptimizationPriority:        4,
 		RecursiveOptimizationHasNativeSyntax: true, // WITH RECURSIVE
 
 		AdapterTags: []string{"embedded", "lightweight", "relational"},
@@ -438,24 +440,27 @@ func NewSQLiteQueryFeatures() *QueryFeatures {
 		},
 
 		FallbackStrategies: map[string]QueryFallbackStrategy{
-			"full_outer_join":     QueryFallbackMultiQuery,
-			"full_text_search":    QueryFallbackApplicationLayer,
-			"regex_match":         QueryFallbackApplicationLayer,
+			"full_outer_join":  QueryFallbackMultiQuery,
+			"full_text_search": QueryFallbackAlternativeSyntax,
+			"regex_match":      QueryFallbackApplicationLayer,
+			"json_path":        QueryFallbackCustomFunction,
 		},
 		FeatureNotes: map[string]string{
-			"full_outer_join": "SQLite 不支持，可用 LEFT JOIN UNION RIGHT JOIN",
-			"full_text_search": "需要启用 FTS 扩展或在应用层处理",
-			"regex_match": "需要通过 Go 注册 REGEXP 函数",
-			"recursive_cte": "SQLite 3.8.4+ 支持",
+			"full_outer_join":  "SQLite 不支持，可用 LEFT JOIN UNION RIGHT JOIN",
+			"full_text_search": "默认降级为 LIKE；启用 FTS 扩展后可使用 MATCH",
+			"regex_match":      "需要通过 Go 注册 REGEXP 函数",
+			"json_path":        "优先使用 JSON1 扩展；缺失时可注册 JSON_EXTRACT_GO，再回退到应用层解析",
+			"recursive_cte":    "SQLite 3.8.4+ 支持",
 		},
 		AlternativeSyntax: map[string]string{
 			"insert_ignore": "INSERT OR IGNORE INTO ...",
-			"upsert": "INSERT INTO ... ON CONFLICT ... DO UPDATE SET ...",
+			"json_path":     "SELECT JSON_EXTRACT_GO(payload, '$.path') FROM ...",
+			"upsert":        "INSERT INTO ... ON CONFLICT ... DO UPDATE SET ...",
 		},
 		FeatureSupport: map[string]FeatureSupport{
-			"recursive_cte": {Supported: true, MinVersion: "3.8.4"},
-			"window_func": {Supported: true, MinVersion: "3.25.0"},
-			"json_path": {Supported: true, MinVersion: "3.9.0"},
+			"recursive_cte":         {Supported: true, MinVersion: "3.8.4"},
+			"window_func":           {Supported: true, MinVersion: "3.25.0"},
+			"json_path":             {Supported: true, MinVersion: "3.9.0", Notes: "依赖 JSON1；可通过 JSON_EXTRACT_GO 自定义函数降级"},
 			"order_by_in_aggregate": {Supported: true, MinVersion: "3.30.0"},
 		},
 	}
@@ -465,13 +470,13 @@ func NewSQLiteQueryFeatures() *QueryFeatures {
 func NewSQLServerQueryFeatures() *QueryFeatures {
 	return &QueryFeatures{
 		// 基础特性 - 全部支持
-		SupportsIN:            true,
-		SupportsNotIN:         true,
-		SupportsBetween:       true,
-		SupportsLike:          true,
-		SupportsDistinct:      true,
-		SupportsGroupBy:       true,
-		SupportsHaving:        true,
+		SupportsIN:       true,
+		SupportsNotIN:    true,
+		SupportsBetween:  true,
+		SupportsLike:     true,
+		SupportsDistinct: true,
+		SupportsGroupBy:  true,
+		SupportsHaving:   true,
 
 		// JOIN 操作 - 全部支持
 		SupportsInnerJoin:     true,
@@ -482,14 +487,14 @@ func NewSQLServerQueryFeatures() *QueryFeatures {
 		SupportsSelfJoin:      true,
 
 		// 高级特性
-		SupportsCTE:           true,
-		SupportsRecursiveCTE:  true,  // ✅ WITH ... AS RECURSIVE
-		SupportsWindowFunc:    true,
-		SupportsSubquery:      true,
+		SupportsCTE:                true,
+		SupportsRecursiveCTE:       true, // ✅ WITH ... AS RECURSIVE
+		SupportsWindowFunc:         true,
+		SupportsSubquery:           true,
 		SupportsCorrelatedSubquery: true,
-		SupportsUnion:         true,
-		SupportsExcept:        true,  // ✅ EXCEPT (而非 MINUS)
-		SupportsIntersect:     true,
+		SupportsUnion:              true,
+		SupportsExcept:             true, // ✅ EXCEPT (而非 MINUS)
+		SupportsIntersect:          true,
 
 		// 聚合
 		SupportsOrderByInAggregate: true,
@@ -497,65 +502,145 @@ func NewSQLServerQueryFeatures() *QueryFeatures {
 		SupportsStringAggregate:    true,  // ✅ STRING_AGG()
 
 		// 文本搜索
-		SupportsFullTextSearch:     true,  // ✅ Full-Text Search
-		SupportsRegexMatch:         false, // ❌ 不原生支持
-		SupportsFuzzyMatch:         false, // ❌ 不原生支持
+		SupportsFullTextSearch: true,  // ✅ Full-Text Search
+		SupportsRegexMatch:     false, // ❌ 不原生支持
+		SupportsFuzzyMatch:     false, // ❌ 不原生支持
 
 		// JSON
-		SupportsJSONPath:       true,  // ✅ JSON_VALUE, JSON_QUERY
-		SupportsJSONType:       false, // ❌ 以文本形式存储
-		SupportsJSONOperators:  true,  // ✅ JSON 函数
-		SupportsJSONAgg:        true,  // ✅ JSON_QUERY FOR JSON
+		SupportsJSONPath:      true,  // ✅ JSON_VALUE, JSON_QUERY
+		SupportsJSONType:      false, // ❌ 以文本形式存储
+		SupportsJSONOperators: true,  // ✅ JSON 函数
+		SupportsJSONAgg:       true,  // ✅ JSON_QUERY FOR JSON
 
 		// 其他
-		SupportsCase:           true,
-		SupportsCaseWithElse:   true,
-		SupportsLimit:          false, // ❌ 用 OFFSET...FETCH 或 TOP
-		SupportsOffset:         true,  // ✅ OFFSET ... ROWS FETCH NEXT
-		SupportsOrderBy:        true,
-		SupportsNulls:          true,
-		SupportsCastType:       true,
-		SupportsCoalesce:       true,
-		SupportsIfExists:       true,
-		SupportsInsertIgnore:   false, // ❌ 用 MERGE
-		SupportsUpsert:         true,  // ✅ MERGE ... WHEN MATCHED THEN
+		SupportsCase:         true,
+		SupportsCaseWithElse: true,
+		SupportsLimit:        false, // ❌ 用 OFFSET...FETCH 或 TOP
+		SupportsOffset:       true,  // ✅ OFFSET ... ROWS FETCH NEXT
+		SupportsOrderBy:      true,
+		SupportsNulls:        true,
+		SupportsCastType:     true,
+		SupportsCoalesce:     true,
+		SupportsIfExists:     true,
+		SupportsInsertIgnore: false, // ❌ 用 MERGE
+		SupportsUpsert:       true,  // ✅ MERGE ... WHEN MATCHED THEN
 
 		// VIEW 支持
-		SupportsView:               true,
-		SupportsMaterializedView:   false, // ❌ 但有类似的优化视图
-		SupportsViewForPreload:     true,  // ✅ 可用于 Preload 优化
+		SupportsView:             true,
+		SupportsMaterializedView: false, // ❌ 但有类似的优化视图
+		SupportsViewForPreload:   true,  // ✅ 可用于 Preload 优化
 
 		// 多 Adapter 优化
-		SearchOptimizationSupported:    true,
-		SearchOptimizationIsOptimal:    false,
-		SearchOptimizationPriority:     3,
-		RecursiveOptimizationSupported:     true,
-		RecursiveOptimizationIsOptimal:     true, // ✅ SQL Server 是递归优于 PostgreSQL 的选择
-		RecursiveOptimizationPriority:      1,
+		SearchOptimizationSupported:          true,
+		SearchOptimizationIsOptimal:          false,
+		SearchOptimizationPriority:           3,
+		RecursiveOptimizationSupported:       true,
+		RecursiveOptimizationIsOptimal:       true, // ✅ SQL Server 是递归优于 PostgreSQL 的选择
+		RecursiveOptimizationPriority:        1,
 		RecursiveOptimizationHasNativeSyntax: true, // ✅ WITH ... AS RECURSIVE
 
 		AdapterTags: []string{"relational", "enterprise", "full_text_search"},
 
 		OptimizationNotes: map[string]string{
 			"recursive_optimal": "SQL Server 的递归CTE性能优于 PostgreSQL",
-			"full_text_search": "有专门的全文搜索功能",
+			"full_text_search":  "有专门的全文搜索功能",
 		},
 
 		FallbackStrategies: map[string]QueryFallbackStrategy{
-			"limit":              QueryFallbackAlternativeSyntax, // 用 OFFSET...FETCH NEXT
-			"array_aggregate":    QueryFallbackAlternativeSyntax, // 用 STRING_AGG
-			"regex_match":        QueryFallbackApplicationLayer,
+			"limit":           QueryFallbackAlternativeSyntax, // 用 OFFSET...FETCH NEXT
+			"array_aggregate": QueryFallbackAlternativeSyntax, // 用 STRING_AGG
+			"regex_match":     QueryFallbackApplicationLayer,
 		},
 		FeatureNotes: map[string]string{
-			"limit": "SQL Server 用 OFFSET ... ROWS FETCH NEXT ... ROWS ONLY",
-			"recursive_cte": "WITH ... AS RECURSIVE",
+			"limit":            "SQL Server 用 OFFSET ... ROWS FETCH NEXT ... ROWS ONLY",
+			"recursive_cte":    "WITH ... AS RECURSIVE",
 			"full_text_search": "启用全文搜索后支持",
 		},
 		AlternativeSyntax: map[string]string{
-			"limit": "SELECT ... FROM ... ORDER BY ... OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+			"limit":  "SELECT ... FROM ... ORDER BY ... OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
 			"upsert": "MERGE INTO target USING source ... WHEN MATCHED THEN UPDATE ...",
 		},
 		FeatureSupport: map[string]FeatureSupport{},
+	}
+}
+
+// NewNeo4jQueryFeatures Neo4j 查询特性（Cypher 能力映射）。
+func NewNeo4jQueryFeatures() *QueryFeatures {
+	return &QueryFeatures{
+		SupportsIN:       true,
+		SupportsNotIN:    true,
+		SupportsBetween:  true,
+		SupportsLike:     false,
+		SupportsDistinct: true,
+		SupportsGroupBy:  true,
+		SupportsHaving:   true,
+
+		SupportsInnerJoin:     false,
+		SupportsLeftJoin:      false,
+		SupportsRightJoin:     false,
+		SupportsCrossJoin:     false,
+		SupportsFullOuterJoin: false,
+		SupportsSelfJoin:      false,
+
+		SupportsCTE:                false,
+		SupportsRecursiveCTE:       true,
+		SupportsWindowFunc:         false,
+		SupportsSubquery:           true,
+		SupportsCorrelatedSubquery: false,
+		SupportsUnion:              true,
+		SupportsExcept:             false,
+		SupportsIntersect:          false,
+
+		SupportsOrderByInAggregate: false,
+		SupportsArrayAggregate:     true,
+		SupportsStringAggregate:    true,
+
+		SupportsFullTextSearch: true,
+		SupportsRegexMatch:     true,
+		SupportsFuzzyMatch:     true,
+
+		SupportsJSONPath:      true,
+		SupportsJSONType:      true,
+		SupportsJSONOperators: false,
+		SupportsJSONAgg:       true,
+
+		SupportsCase:         true,
+		SupportsCaseWithElse: true,
+		SupportsLimit:        true,
+		SupportsOffset:       true,
+		SupportsOrderBy:      true,
+		SupportsNulls:        true,
+		SupportsCastType:     false,
+		SupportsCoalesce:     true,
+
+		SupportsIfExists:     true,
+		SupportsInsertIgnore: false,
+		SupportsUpsert:       true,
+
+		SupportsView:             false,
+		SupportsMaterializedView: false,
+		SupportsViewForPreload:   false,
+
+		SearchOptimizationSupported:          true,
+		SearchOptimizationIsOptimal:          true,
+		SearchOptimizationPriority:           1,
+		RecursiveOptimizationSupported:       true,
+		RecursiveOptimizationIsOptimal:       true,
+		RecursiveOptimizationPriority:        1,
+		RecursiveOptimizationHasNativeSyntax: true,
+
+		AdapterTags: []string{"graph", "cypher", "full_text_search"},
+
+		OptimizationNotes: map[string]string{
+			"graph_traversal": "Neo4j 原生图遍历适合高复杂关系查询",
+		},
+
+		FallbackStrategies: map[string]QueryFallbackStrategy{},
+		FeatureNotes: map[string]string{
+			"recursive_cte": "Cypher 使用可变长度路径匹配替代 SQL 递归 CTE",
+		},
+		AlternativeSyntax: map[string]string{},
+		FeatureSupport:    map[string]FeatureSupport{},
 	}
 }
 
@@ -572,6 +657,10 @@ func GetQueryFeatures(dbType string) *QueryFeatures {
 		return NewSQLiteQueryFeatures()
 	case "sqlserver":
 		return NewSQLServerQueryFeatures()
+	case "neo4j":
+		return NewNeo4jQueryFeatures()
+	case "mongodb":
+		return NewMongoQueryFeatures()
 	default:
 		// 默认返回最小特性集
 		return &QueryFeatures{}
@@ -720,9 +809,9 @@ func (qf *QueryFeatures) SupportsFeatureWithVersion(feature, version string) boo
 // CompareQueryFeatures 对比两个数据库的查询特性
 func CompareQueryFeatures(qf1, qf2 *QueryFeatures) map[string]interface{} {
 	result := map[string]interface{}{
-		"common_features": []string{},
-		"only_in_first":   []string{},
-		"only_in_second":  []string{},
+		"common_features":    []string{},
+		"only_in_first":      []string{},
+		"only_in_second":     []string{},
 		"different_fallback": map[string][2]QueryFallbackStrategy{},
 	}
 

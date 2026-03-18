@@ -8,13 +8,19 @@ import (
 )
 
 func setupMySQLRepo(t *testing.T) (*db.Repository, func()) {
-	config := &db.Config{
-		Adapter:  "mysql",
-		Host:     getEnv("MYSQL_HOST", "localhost"),
-		Port:     getEnvInt("MYSQL_PORT", 3306),
-		Username: getEnv("MYSQL_USER", "testuser"),
-		Password: getEnv("MYSQL_PASSWORD", "testpass"),
-		Database: getEnv("MYSQL_DB", "testdb"),
+	config, err := db.LoadConfigFromEnvWithDefaults("mysql", &db.Config{
+		Adapter: "mysql",
+		MySQL: &db.MySQLConnectionConfig{
+			Host:     "localhost",
+			Port:     3306,
+			Username: "testuser",
+			Password: "testpass",
+			Database: "testdb",
+		},
+	})
+	if err != nil {
+		t.Skipf("MySQL 配置无效: %v", err)
+		return nil, nil
 	}
 
 	repo, err := db.NewRepository(config)
@@ -144,4 +150,3 @@ func TestMySQLQueryBuilderCRUD(t *testing.T) {
 		t.Fatalf("期望 0 条记录，得到 %d", count)
 	}
 }
-

@@ -4,10 +4,82 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
+var legacyQueryBuilderWarningEnabled atomic.Bool
+var legacyQueryBuilderWarningOnce sync.Once
+
+func init() {
+	legacyQueryBuilderWarningEnabled.Store(true)
+}
+
+// SetLegacyQueryBuilderWarningEnabled 设置 v1 QueryBuilder 弃用提示开关。
+func SetLegacyQueryBuilderWarningEnabled(enabled bool) {
+	legacyQueryBuilderWarningEnabled.Store(enabled)
+}
+
+func maybeWarnLegacyQueryBuilder() {
+	if !legacyQueryBuilderWarningEnabled.Load() {
+		return
+	}
+
+	legacyQueryBuilderWarningOnce.Do(func() {
+		log.Printf("[eit-db] QueryBuilder(v1) 已进入兼容模式，建议迁移到 Repository.NewQueryConstructor() 使用 v2 查询构造器")
+	})
+}
+
+func quoteCommaSeparatedIdentifiers(dialect SQLDialect, raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "*" {
+		return trimmed
+	}
+
+	parts := strings.Split(trimmed, ",")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parts[i] = dialect.QuoteIdentifier(part)
+	}
+
+	return strings.Join(parts, ", ")
+}
+
+func quoteOrderByClause(dialect SQLDialect, raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	items := strings.Split(trimmed, ",")
+	for i, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		fields := strings.Fields(item)
+		if len(fields) == 0 {
+			continue
+		}
+
+		quoted := dialect.QuoteIdentifier(fields[0])
+		if len(fields) > 1 {
+			quoted = quoted + " " + strings.ToUpper(fields[1])
+		}
+		items[i] = quoted
+	}
+
+	return strings.Join(items, ", ")
+}
+
 // QueryBuilder 查询构建器 (使用 Changeset 进行数据操作)
+// Deprecated: QueryBuilder(v1) 仅保留兼容，建议使用 Repository.NewQueryConstructor() 创建 v2 查询构造器。
 type QueryBuilder struct {
 	schema  Schema
 	repo    *Repository
@@ -15,7 +87,10 @@ type QueryBuilder struct {
 }
 
 // NewQueryBuilder 创建查询构建器
+// Deprecated: 使用 Repository.NewQueryConstructor(schema) 获取 v2 查询构造器。
 func NewQueryBuilder(schema Schema, repo *Repository) *QueryBuilder {
+	maybeWarnLegacyQueryBuilder()
+
 	return &QueryBuilder{
 		schema:  schema,
 		repo:    repo,
@@ -27,6 +102,23 @@ func NewQueryBuilder(schema Schema, repo *Repository) *QueryBuilder {
 func (qb *QueryBuilder) WithContext(ctx context.Context) *QueryBuilder {
 	qb.context = ctx
 	return qb
+}
+
+func (qb *QueryBuilder) dialect() SQLDialect {
+	if qb == nil || qb.repo == nil || qb.repo.adapter == nil {
+		return NewMySQLDialect()
+	}
+
+	provider := qb.repo.adapter.GetQueryBuilderProvider()
+	if p, ok := provider.(*DefaultSQLQueryConstructorProvider); ok && p.dialect != nil {
+		return p.dialect
+	}
+
+	return NewMySQLDialect()
+}
+
+func (qb *QueryBuilder) quoteIdentifier(name string) string {
+	return qb.dialect().QuoteIdentifier(name)
 }
 
 // ==================== INSERT 操作 ====================
@@ -46,14 +138,14 @@ func (qb *QueryBuilder) Insert(cs *Changeset) (sql.Result, error) {
 	values := make([]interface{}, 0)
 
 	for fieldName, value := range cs.Changes() {
-		fields = append(fields, fieldName)
+		fields = append(fields, qb.quoteIdentifier(fieldName))
 		placeholders = append(placeholders, "?")
 		values = append(values, value)
 	}
 
 	sql := fmt.Sprintf(
 		"INSERT INTO %s (%s) VALUES (%s)",
-		qb.schema.TableName(),
+		qb.quoteIdentifier(qb.schema.TableName()),
 		strings.Join(fields, ", "),
 		strings.Join(placeholders, ", "),
 	)
@@ -79,7 +171,7 @@ func (qb *QueryBuilder) Update(cs *Changeset, whereClause string, whereArgs ...i
 	values := make([]interface{}, 0)
 
 	for fieldName, value := range changes {
-		setClauses = append(setClauses, fieldName+" = ?")
+		setClauses = append(setClauses, qb.quoteIdentifier(fieldName)+" = ?")
 		values = append(values, value)
 	}
 
@@ -90,7 +182,7 @@ func (qb *QueryBuilder) Update(cs *Changeset, whereClause string, whereArgs ...i
 
 	sql := fmt.Sprintf(
 		"UPDATE %s SET %s",
-		qb.schema.TableName(),
+		qb.quoteIdentifier(qb.schema.TableName()),
 		strings.Join(setClauses, ", "),
 	)
 
@@ -103,14 +195,14 @@ func (qb *QueryBuilder) Update(cs *Changeset, whereClause string, whereArgs ...i
 
 // UpdateByID 按 ID 更新数据
 func (qb *QueryBuilder) UpdateByID(id interface{}, cs *Changeset) (sql.Result, error) {
-	return qb.Update(cs, "id = ?", id)
+	return qb.Update(cs, qb.quoteIdentifier("id")+" = ?", id)
 }
 
 // ==================== DELETE 操作 ====================
 
 // Delete 删除数据
 func (qb *QueryBuilder) Delete(whereClause string, whereArgs ...interface{}) (sql.Result, error) {
-	sql := fmt.Sprintf("DELETE FROM %s", qb.schema.TableName())
+	sql := fmt.Sprintf("DELETE FROM %s", qb.quoteIdentifier(qb.schema.TableName()))
 
 	if whereClause != "" {
 		sql += " WHERE " + whereClause
@@ -122,7 +214,7 @@ func (qb *QueryBuilder) Delete(whereClause string, whereArgs ...interface{}) (sq
 
 // DeleteByID 按 ID 删除数据
 func (qb *QueryBuilder) DeleteByID(id interface{}) (sql.Result, error) {
-	return qb.Delete("id = ?", id)
+	return qb.Delete(qb.quoteIdentifier("id")+" = ?", id)
 }
 
 // SoftDelete 软删除数据 (仅适用于有 deleted_at 字段的表)
@@ -140,7 +232,7 @@ func (qb *QueryBuilder) SoftDelete(whereClause string, whereArgs ...interface{})
 
 // SoftDeleteByID 按 ID 软删除数据
 func (qb *QueryBuilder) SoftDeleteByID(id interface{}) (sql.Result, error) {
-	return qb.SoftDelete("id = ?", id)
+	return qb.SoftDelete(qb.quoteIdentifier("id")+" = ?", id)
 }
 
 // ==================== SELECT 操作 ====================
@@ -151,7 +243,11 @@ func (qb *QueryBuilder) Select(columns string, whereClause string, whereArgs ...
 		columns = "*"
 	}
 
-	sql := fmt.Sprintf("SELECT %s FROM %s", columns, qb.schema.TableName())
+	sql := fmt.Sprintf(
+		"SELECT %s FROM %s",
+		quoteCommaSeparatedIdentifiers(qb.dialect(), columns),
+		qb.quoteIdentifier(qb.schema.TableName()),
+	)
 
 	if whereClause != "" {
 		sql += " WHERE " + whereClause
@@ -169,8 +265,9 @@ func (qb *QueryBuilder) SelectAll() (*sql.Rows, error) {
 // SelectByID 按 ID 查询单条数据
 func (qb *QueryBuilder) SelectByID(id interface{}) (*sql.Row, error) {
 	sql := fmt.Sprintf(
-		"SELECT * FROM %s WHERE id = ? LIMIT 1",
-		qb.schema.TableName(),
+		"SELECT * FROM %s WHERE %s = ? LIMIT 1",
+		qb.quoteIdentifier(qb.schema.TableName()),
+		qb.quoteIdentifier("id"),
 	)
 	return qb.repo.QueryRow(qb.context, sql, id), nil
 }
@@ -179,7 +276,7 @@ func (qb *QueryBuilder) SelectByID(id interface{}) (*sql.Row, error) {
 func (qb *QueryBuilder) SelectOne(whereClause string, whereArgs ...interface{}) (*sql.Row, error) {
 	sql := fmt.Sprintf(
 		"SELECT * FROM %s WHERE %s LIMIT 1",
-		qb.schema.TableName(),
+		qb.quoteIdentifier(qb.schema.TableName()),
 		whereClause,
 	)
 	return qb.repo.QueryRow(qb.context, sql, whereArgs...), nil
@@ -187,7 +284,7 @@ func (qb *QueryBuilder) SelectOne(whereClause string, whereArgs ...interface{}) 
 
 // SelectCount 查询数据总数
 func (qb *QueryBuilder) SelectCount(whereClause string, whereArgs ...interface{}) (int64, error) {
-	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s", qb.schema.TableName())
+	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s", qb.quoteIdentifier(qb.schema.TableName()))
 	if whereClause != "" {
 		sql += " WHERE " + whereClause
 	}
@@ -210,7 +307,7 @@ func (qb *QueryBuilder) Transaction(fn func(*QueryBuilder) error) error {
 	// 创建事务内的查询构建器
 	txQB := &QueryBuilder{
 		schema:  qb.schema,
-		repo:    &Repository{adapter: &txAdapter{tx: tx}},
+		repo:    &Repository{adapter: &txAdapter{tx: tx, provider: qb.repo.adapter.GetQueryBuilderProvider()}},
 		context: qb.context,
 	}
 
@@ -226,7 +323,8 @@ func (qb *QueryBuilder) Transaction(fn func(*QueryBuilder) error) error {
 
 // txAdapter 事务适配器
 type txAdapter struct {
-	tx Tx
+	tx       Tx
+	provider QueryConstructorProvider
 }
 
 func (ta *txAdapter) Connect(ctx context.Context, config *Config) error {
@@ -274,6 +372,9 @@ func (ta *txAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskSt
 }
 
 func (ta *txAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
+	if ta.provider != nil {
+		return ta.provider
+	}
 	return NewDefaultSQLQueryConstructorProvider(NewMySQLDialect())
 }
 
@@ -285,39 +386,41 @@ func (ta *txAdapter) GetQueryFeatures() *QueryFeatures {
 func (ta *txAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 	// 事务适配器返回基本的特性集，与 GORM adapter 保持一致
 	return &DatabaseFeatures{
-		SupportsCompositeKeys:    true,
-		SupportsCompositeIndexes: true,
-		SupportsPartialIndexes:   false,
-		SupportsDeferrable:       false,
-		
+		SupportsCompositeKeys:        true,
+		SupportsForeignKeys:          true,
+		SupportsCompositeForeignKeys: true,
+		SupportsCompositeIndexes:     true,
+		SupportsPartialIndexes:       false,
+		SupportsDeferrable:           false,
+
 		SupportsEnumType:      true,
 		SupportsCompositeType: false,
 		SupportsDomainType:    false,
 		SupportsUDT:           false,
-		
+
 		SupportsStoredProcedures: true,
 		SupportsFunctions:        true,
 		SupportsAggregateFuncs:   false,
 		FunctionLanguages:        []string{"sql"},
-		
+
 		SupportsWindowFunctions: true,
 		SupportsCTE:             true,
 		SupportsRecursiveCTE:    true,
 		SupportsMaterializedCTE: false,
-		
+
 		HasNativeJSON:     true,
 		SupportsJSONPath:  true,
 		SupportsJSONIndex: true,
-		
+
 		SupportsFullTextSearch: true,
 		FullTextLanguages:      []string{"english"},
-		
+
 		SupportsArrays:       false,
 		SupportsGenerated:    true,
 		SupportsReturning:    false,
 		SupportsUpsert:       true,
 		SupportsListenNotify: false,
-		
+
 		DatabaseName:    "Transaction Adapter",
 		DatabaseVersion: "Unknown",
 		Description:     "Transaction wrapper adapter",
@@ -327,6 +430,7 @@ func (ta *txAdapter) GetDatabaseFeatures() *DatabaseFeatures {
 // ==================== 链式操作辅助类 ====================
 
 // QueryChain 链式查询构建器
+// Deprecated: QueryChain 属于 v1 兼容层，建议迁移到 v2 QueryConstructor 链式 API。
 type QueryChain struct {
 	builder   *QueryBuilder
 	whereSQL  string
@@ -366,14 +470,14 @@ func (qc *QueryChain) OrderBy(orderBy string) *QueryChain {
 
 // First 查询第一条
 func (qc *QueryChain) First() (*sql.Row, error) {
-	sql := fmt.Sprintf("SELECT * FROM %s", qc.builder.schema.TableName())
+	sql := fmt.Sprintf("SELECT * FROM %s", qc.builder.quoteIdentifier(qc.builder.schema.TableName()))
 
 	if qc.whereSQL != "" {
 		sql += " WHERE " + qc.whereSQL
 	}
 
 	if qc.orderBy != "" {
-		sql += " ORDER BY " + qc.orderBy
+		sql += " ORDER BY " + quoteOrderByClause(qc.builder.dialect(), qc.orderBy)
 	}
 
 	sql += " LIMIT 1"
@@ -383,14 +487,14 @@ func (qc *QueryChain) First() (*sql.Row, error) {
 
 // All 查询所有
 func (qc *QueryChain) All() (*sql.Rows, error) {
-	sql := fmt.Sprintf("SELECT * FROM %s", qc.builder.schema.TableName())
+	sql := fmt.Sprintf("SELECT * FROM %s", qc.builder.quoteIdentifier(qc.builder.schema.TableName()))
 
 	if qc.whereSQL != "" {
 		sql += " WHERE " + qc.whereSQL
 	}
 
 	if qc.orderBy != "" {
-		sql += " ORDER BY " + qc.orderBy
+		sql += " ORDER BY " + quoteOrderByClause(qc.builder.dialect(), qc.orderBy)
 	}
 
 	if qc.limit > 0 {
@@ -406,7 +510,7 @@ func (qc *QueryChain) All() (*sql.Rows, error) {
 
 // Count 统计数量
 func (qc *QueryChain) Count() (int64, error) {
-	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s", qc.builder.schema.TableName())
+	sql := fmt.Sprintf("SELECT COUNT(*) FROM %s", qc.builder.quoteIdentifier(qc.builder.schema.TableName()))
 
 	if qc.whereSQL != "" {
 		sql += " WHERE " + qc.whereSQL

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -15,52 +16,67 @@ func TestDatabaseFeatures(t *testing.T) {
 			"PostgreSQL",
 			"postgres",
 			map[string]bool{
-				"composite_keys":      true,
-				"enum_type":           true,
-				"composite_type":      true,
-				"domain_type":         true,
-				"window_functions":    true,
-				"materialized_cte":    true,
-				"arrays":              true,
-				"returning":           true,
-				"listen_notify":       true,
+				"composite_keys":         true,
+				"composite_foreign_keys": true,
+				"enum_type":              true,
+				"composite_type":         true,
+				"domain_type":            true,
+				"window_functions":       true,
+				"materialized_cte":       true,
+				"arrays":                 true,
+				"returning":              true,
+				"listen_notify":          true,
 			},
 		},
 		{
 			"MySQL",
 			"mysql",
 			map[string]bool{
-				"composite_keys":      true,
-				"enum_type":           true, // Column-level ENUM
-				"composite_type":      false,
-				"arrays":              false,
-				"returning":           false,
-				"listen_notify":       false,
+				"composite_keys":         true,
+				"composite_foreign_keys": true,
+				"enum_type":              true, // Column-level ENUM
+				"composite_type":         false,
+				"arrays":                 false,
+				"returning":              false,
+				"listen_notify":          false,
 			},
 		},
 		{
 			"SQLite",
 			"sqlite",
 			map[string]bool{
-				"composite_keys":      true,
-				"partial_indexes":     true,
-				"deferrable":          true,
-				"enum_type":           false,
-				"functions":           true, // ✅ Supported via Go registration
-				"stored_procedures":   false,
-				"arrays":              false,
+				"composite_keys":         true,
+				"composite_foreign_keys": true,
+				"partial_indexes":        true,
+				"deferrable":             true,
+				"enum_type":              false,
+				"functions":              true, // ✅ Supported via Go registration
+				"stored_procedures":      false,
+				"arrays":                 false,
 			},
 		},
 		{
 			"SQL Server",
 			"sqlserver",
 			map[string]bool{
-				"composite_keys":      true,
-				"udt":                 true,
-				"enum_type":           false, // No ENUM type
-				"window_functions":    true,
-				"arrays":              false,
-				"listen_notify":       false, // Use Service Broker
+				"composite_keys":         true,
+				"composite_foreign_keys": true,
+				"udt":                    true,
+				"enum_type":              false, // No ENUM type
+				"window_functions":       true,
+				"arrays":                 false,
+				"listen_notify":          false, // Use Service Broker
+			},
+		},
+		{
+			"Neo4j",
+			"neo4j",
+			map[string]bool{
+				"transactions":      false,
+				"stored_procedures": false,
+				"window_functions":  false,
+				"arrays":            true,
+				"native_json":       true,
 			},
 		},
 	}
@@ -79,6 +95,8 @@ func TestDatabaseFeatures(t *testing.T) {
 				adapter = &SQLiteAdapter{}
 			case "sqlserver":
 				adapter = &SQLServerAdapter{}
+			case "neo4j":
+				adapter = &Neo4jAdapter{}
 			default:
 				t.Fatalf("Unknown adapter: %s", tc.adapter)
 			}
@@ -104,6 +122,21 @@ func TestDatabaseFeatures(t *testing.T) {
 
 			t.Logf("✓ %s features validated: %s (v%s)", tc.name, features.DatabaseName, features.DatabaseVersion)
 		})
+	}
+}
+
+func TestMongoCompositeForeignKeyCapability(t *testing.T) {
+	features := NewMongoDatabaseFeatures()
+	if features.SupportsCompositeForeignKeys {
+		t.Fatal("MongoDB should not support composite foreign keys")
+	}
+
+	if !features.SupportsCompositeIndexes {
+		t.Fatal("MongoDB should support composite indexes for document query optimization")
+	}
+
+	if !strings.Contains(features.Description, "$lookup") {
+		t.Fatalf("MongoDB description should distinguish non-FK join style, got: %s", features.Description)
 	}
 }
 
@@ -157,9 +190,9 @@ func TestGetFeaturesByCategory(t *testing.T) {
 	features := adapter.GetDatabaseFeatures()
 
 	testCases := []struct {
-		category       FeatureCategory
-		minExpected    int
-		shouldContain  string
+		category      FeatureCategory
+		minExpected   int
+		shouldContain string
 	}{
 		{CategoryIndexing, 3, "composite_keys"},
 		{CategoryTypes, 3, "enum_type"},
@@ -239,13 +272,14 @@ func TestSQLServerFeatures(t *testing.T) {
 	// SQL Server 应该支持的特性
 	expectedSupport := []string{
 		"composite_keys",
-		"udt",                 // User-Defined Types
+		"composite_foreign_keys",
+		"udt", // User-Defined Types
 		"stored_procedures",
 		"functions",
 		"window_functions",
 		"cte",
-		"returning",           // OUTPUT clause
-		"upsert",              // MERGE
+		"returning", // OUTPUT clause
+		"upsert",    // MERGE
 	}
 
 	for _, feature := range expectedSupport {
@@ -256,9 +290,9 @@ func TestSQLServerFeatures(t *testing.T) {
 
 	// SQL Server 不支持的特性
 	expectedNoSupport := []string{
-		"enum_type",      // No native ENUM
-		"arrays",         // No array type
-		"listen_notify",  // Use Service Broker instead
+		"enum_type",     // No native ENUM
+		"arrays",        // No array type
+		"listen_notify", // Use Service Broker instead
 	}
 
 	for _, feature := range expectedNoSupport {
@@ -306,10 +340,50 @@ func TestAllDatabasesSupportsComposite(t *testing.T) {
 			t.Errorf("%s should support composite keys", tc.name)
 		}
 
+		if !features.SupportsCompositeForeignKeys {
+			t.Errorf("%s should support composite foreign keys", tc.name)
+		}
+
 		if !features.SupportsCompositeIndexes {
 			t.Errorf("%s should support composite indexes", tc.name)
 		}
 
-		t.Logf("✓ %s supports composite keys and indexes", tc.name)
+		t.Logf("✓ %s supports composite keys, composite foreign keys and indexes", tc.name)
+	}
+}
+
+func TestDatabaseFeatureVersionSupportForMySQL(t *testing.T) {
+	features := (&MySQLAdapter{}).GetDatabaseFeatures()
+
+	if !features.SupportsFeatureWithVersion("window_functions", "8.0.36") {
+		t.Fatal("MySQL 8.0.36 should support window_functions")
+	}
+
+	if features.SupportsFeatureWithVersion("window_functions", "5.7.44") {
+		t.Fatal("MySQL 5.7.44 should not support window_functions")
+	}
+
+	if !features.SupportsFeatureWithVersion("native_json", "5.7.42") {
+		t.Fatal("MySQL 5.7.42 should support native_json")
+	}
+
+	if features.SupportsFeatureWithVersion("json_index", "8.0.12") {
+		t.Fatal("MySQL 8.0.12 should not support json_index by configured min version")
+	}
+
+	if !features.SupportsFeatureWithVersion("json_index", "8.0.13") {
+		t.Fatal("MySQL 8.0.13 should support json_index")
+	}
+}
+
+func TestDatabaseFeatureFallbackStrategyForMySQL(t *testing.T) {
+	features := (&MySQLAdapter{}).GetDatabaseFeatures()
+
+	if got := features.GetFallbackStrategy("window_functions"); got != FallbackApplicationLayer {
+		t.Fatalf("expected window_functions fallback to application_layer, got %s", got)
+	}
+
+	if got := features.GetFallbackStrategy("unknown_feature"); got != FallbackNone {
+		t.Fatalf("expected unknown feature fallback to none, got %s", got)
 	}
 }

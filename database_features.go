@@ -4,10 +4,12 @@ package db
 // 每个 Adapter 通过此结构声明其支持的数据库特性
 type DatabaseFeatures struct {
 	// ===== 索引和约束 =====
-	SupportsCompositeKeys    bool // 复合主键 (所有数据库都支持)
-	SupportsCompositeIndexes bool // 复合索引 (所有数据库都支持)
-	SupportsPartialIndexes   bool // 部分索引 (WHERE 子句)
-	SupportsDeferrable       bool // 延迟约束 (PostgreSQL, SQLite)
+	SupportsCompositeKeys        bool // 复合主键 (所有数据库都支持)
+	SupportsForeignKeys          bool // 外键约束 (关系型数据库支持，MongoDB 不支持)
+	SupportsCompositeForeignKeys bool // 复合外键 (关系型数据库支持，MongoDB 不支持)
+	SupportsCompositeIndexes     bool // 复合索引 (所有数据库都支持)
+	SupportsPartialIndexes       bool // 部分索引 (WHERE 子句)
+	SupportsDeferrable           bool // 延迟约束 (PostgreSQL, SQLite)
 
 	// ===== 自定义类型 =====
 	SupportsEnumType      bool // ENUM 类型
@@ -47,28 +49,33 @@ type DatabaseFeatures struct {
 	DatabaseName    string // 数据库名称
 	DatabaseVersion string // 版本信息
 	Description     string // 特性描述
+
+	// 版本化能力支持（可选）
+	FeatureSupport map[string]FeatureSupport
+	// 特性降级策略（可选）
+	FallbackStrategies map[string]FeatureFallback
 }
 
 // FeatureCategory 特性分类
 type FeatureCategory string
 
 const (
-	CategoryIndexing    FeatureCategory = "indexing"     // 索引和约束
-	CategoryTypes       FeatureCategory = "types"        // 自定义类型
-	CategoryFunctions   FeatureCategory = "functions"    // 函数和存储过程
-	CategoryAdvanced    FeatureCategory = "advanced"     // 高级查询
-	CategoryJSON        FeatureCategory = "json"         // JSON 支持
-	CategoryFullText    FeatureCategory = "full_text"    // 全文搜索
-	CategoryOther       FeatureCategory = "other"        // 其他特性
+	CategoryIndexing  FeatureCategory = "indexing"  // 索引和约束
+	CategoryTypes     FeatureCategory = "types"     // 自定义类型
+	CategoryFunctions FeatureCategory = "functions" // 函数和存储过程
+	CategoryAdvanced  FeatureCategory = "advanced"  // 高级查询
+	CategoryJSON      FeatureCategory = "json"      // JSON 支持
+	CategoryFullText  FeatureCategory = "full_text" // 全文搜索
+	CategoryOther     FeatureCategory = "other"     // 其他特性
 )
 
 // FeatureFallback 特性降级策略
 type FeatureFallback string
 
 const (
-	FallbackNone            FeatureFallback = "none"              // 不支持，返回错误
-	FallbackCheckConstraint FeatureFallback = "check_constraint"  // 使用 CHECK 约束
-	FallbackDynamicTable    FeatureFallback = "dynamic_table"     // 使用动态类型表
+	FallbackNone             FeatureFallback = "none"              // 不支持，返回错误
+	FallbackCheckConstraint  FeatureFallback = "check_constraint"  // 使用 CHECK 约束
+	FallbackDynamicTable     FeatureFallback = "dynamic_table"     // 使用动态类型表
 	FallbackApplicationLayer FeatureFallback = "application_layer" // 应用层处理
 )
 
@@ -77,6 +84,10 @@ func (f *DatabaseFeatures) HasFeature(feature string) bool {
 	switch feature {
 	case "composite_keys":
 		return f.SupportsCompositeKeys
+	case "foreign_keys":
+		return f.SupportsForeignKeys
+	case "composite_foreign_keys":
+		return f.SupportsCompositeForeignKeys
 	case "composite_indexes":
 		return f.SupportsCompositeIndexes
 	case "partial_indexes":
@@ -128,6 +139,44 @@ func (f *DatabaseFeatures) HasFeature(feature string) bool {
 	}
 }
 
+// GetFeatureSupport 获取特性支持详情（若未定义则回退到 HasFeature）
+func (f *DatabaseFeatures) GetFeatureSupport(feature string) FeatureSupport {
+	if f.FeatureSupport != nil {
+		if support, ok := f.FeatureSupport[feature]; ok {
+			return support
+		}
+	}
+
+	return FeatureSupport{Supported: f.HasFeature(feature)}
+}
+
+// SupportsFeatureWithVersion 根据实例版本判断特性是否可用（version 为空时回退常规判断）
+func (f *DatabaseFeatures) SupportsFeatureWithVersion(feature, version string) bool {
+	support := f.GetFeatureSupport(feature)
+	if !support.Supported {
+		return false
+	}
+
+	if version == "" || support.MinVersion == "" {
+		return true
+	}
+
+	return compareVersion(version, support.MinVersion) >= 0
+}
+
+// GetFallbackStrategy 获取特性降级策略
+func (f *DatabaseFeatures) GetFallbackStrategy(feature string) FeatureFallback {
+	if f.FallbackStrategies == nil {
+		return FallbackNone
+	}
+
+	if strategy, ok := f.FallbackStrategies[feature]; ok {
+		return strategy
+	}
+
+	return FallbackNone
+}
+
 // GetFeaturesByCategory 按分类获取支持的特性列表
 func (f *DatabaseFeatures) GetFeaturesByCategory(category FeatureCategory) []string {
 	features := []string{}
@@ -136,6 +185,12 @@ func (f *DatabaseFeatures) GetFeaturesByCategory(category FeatureCategory) []str
 	case CategoryIndexing:
 		if f.SupportsCompositeKeys {
 			features = append(features, "composite_keys")
+		}
+		if f.SupportsForeignKeys {
+			features = append(features, "foreign_keys")
+		}
+		if f.SupportsCompositeForeignKeys {
+			features = append(features, "composite_foreign_keys")
 		}
 		if f.SupportsCompositeIndexes {
 			features = append(features, "composite_indexes")
@@ -247,7 +302,7 @@ type FeatureComparison struct {
 func findCommonFeatures(f1, f2 *DatabaseFeatures) []string {
 	common := []string{}
 	allFeatures := []string{
-		"composite_keys", "composite_indexes", "partial_indexes", "deferrable",
+		"composite_keys", "foreign_keys", "composite_foreign_keys", "composite_indexes", "partial_indexes", "deferrable",
 		"enum_type", "composite_type", "domain_type", "udt",
 		"stored_procedures", "functions", "aggregate_funcs",
 		"window_functions", "cte", "recursive_cte", "materialized_cte",
@@ -268,7 +323,7 @@ func findCommonFeatures(f1, f2 *DatabaseFeatures) []string {
 func findUniqueFeatures(f1, f2 *DatabaseFeatures) []string {
 	unique := []string{}
 	allFeatures := []string{
-		"composite_keys", "composite_indexes", "partial_indexes", "deferrable",
+		"composite_keys", "foreign_keys", "composite_foreign_keys", "composite_indexes", "partial_indexes", "deferrable",
 		"enum_type", "composite_type", "domain_type", "udt",
 		"stored_procedures", "functions", "aggregate_funcs",
 		"window_functions", "cte", "recursive_cte", "materialized_cte",

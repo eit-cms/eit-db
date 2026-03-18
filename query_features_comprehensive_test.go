@@ -13,28 +13,28 @@ func TestNewPostgreSQLQueryFeatures(t *testing.T) {
 
 	// PostgreSQL 应该支持所有主要特性
 	expectations := map[string]bool{
-		"in_range":              true,
-		"not_in":                true,
-		"between":               true,
-		"like":                  true,
-		"inner_join":            true,
-		"left_join":             true,
-		"right_join":            true,
-		"cross_join":            true,
-		"full_outer_join":       true,
-		"cte":                   true,
-		"recursive_cte":         true,
-		"window_func":           true,
-		"subquery":              true,
-		"correlated_subquery":   true,
-		"union":                 true,
-		"except":                true,
-		"intersect":             true,
-		"full_text_search":      true,
-		"regex_match":           true,
-		"json_path":             true,
-		"json_operators":        true,
-		"upsert":                true,
+		"in_range":            true,
+		"not_in":              true,
+		"between":             true,
+		"like":                true,
+		"inner_join":          true,
+		"left_join":           true,
+		"right_join":          true,
+		"cross_join":          true,
+		"full_outer_join":     true,
+		"cte":                 true,
+		"recursive_cte":       true,
+		"window_func":         true,
+		"subquery":            true,
+		"correlated_subquery": true,
+		"union":               true,
+		"except":              true,
+		"intersect":           true,
+		"full_text_search":    true,
+		"regex_match":         true,
+		"json_path":           true,
+		"json_operators":      true,
+		"upsert":              true,
 	}
 
 	for feature, expected := range expectations {
@@ -159,10 +159,10 @@ func TestNewSQLServerQueryFeatures(t *testing.T) {
 // TestHasQueryFeatureAllDatabases 测试所有数据库的特性检查
 func TestHasQueryFeatureAllDatabases(t *testing.T) {
 	databases := map[string]*QueryFeatures{
-		"postgres":   NewPostgreSQLQueryFeatures(),
-		"mysql":      NewMySQLQueryFeatures(),
-		"sqlite":     NewSQLiteQueryFeatures(),
-		"sqlserver":  NewSQLServerQueryFeatures(),
+		"postgres":  NewPostgreSQLQueryFeatures(),
+		"mysql":     NewMySQLQueryFeatures(),
+		"sqlite":    NewSQLiteQueryFeatures(),
+		"sqlserver": NewSQLServerQueryFeatures(),
 	}
 
 	// 所有数据库都应该支持的基础特性
@@ -220,10 +220,10 @@ func TestGetQueryFeaturesAllDatabases(t *testing.T) {
 // TestGetFallbackStrategy 测试降级策略获取
 func TestGetFallbackStrategy(t *testing.T) {
 	testCases := []struct {
-		name               string
-		qf                 *QueryFeatures
-		feature            string
-		expectedFallback   QueryFallbackStrategy
+		name             string
+		qf               *QueryFeatures
+		feature          string
+		expectedFallback QueryFallbackStrategy
 	}{
 		{
 			"MySQL FULL_OUTER_JOIN",
@@ -235,7 +235,13 @@ func TestGetFallbackStrategy(t *testing.T) {
 			"SQLite full text search",
 			NewSQLiteQueryFeatures(),
 			"full_text_search",
-			QueryFallbackApplicationLayer,
+			QueryFallbackAlternativeSyntax,
+		},
+		{
+			"SQLite json path",
+			NewSQLiteQueryFeatures(),
+			"json_path",
+			QueryFallbackCustomFunction,
 		},
 		{
 			"SQL Server LIMIT",
@@ -264,10 +270,10 @@ func TestGetFallbackStrategy(t *testing.T) {
 // TestGetAlternativeSyntax 测试替代语法获取
 func TestGetAlternativeSyntax(t *testing.T) {
 	testCases := []struct {
-		name                string
-		qf                  *QueryFeatures
-		feature             string
-		shouldHaveSyntax    bool
+		name             string
+		qf               *QueryFeatures
+		feature          string
+		shouldHaveSyntax bool
 	}{
 		{
 			"MySQL FULL_OUTER_JOIN",
@@ -293,7 +299,7 @@ func TestGetAlternativeSyntax(t *testing.T) {
 		syntax := tc.qf.GetAlternativeSyntax(tc.feature)
 		hasContent := syntax != ""
 		if hasContent != tc.shouldHaveSyntax {
-			t.Errorf("%s: syntax presence mismatch. Expected: %v, Got: %v", 
+			t.Errorf("%s: syntax presence mismatch. Expected: %v, Got: %v",
 				tc.name, tc.shouldHaveSyntax, hasContent)
 		}
 		if hasContent && len(syntax) < 10 {
@@ -307,10 +313,10 @@ func TestGetAlternativeSyntax(t *testing.T) {
 // TestGetFeatureNote 测试特性说明获取
 func TestGetFeatureNote(t *testing.T) {
 	testCases := []struct {
-		name            string
-		qf              *QueryFeatures
-		feature         string
-		shouldHaveNote  bool
+		name           string
+		qf             *QueryFeatures
+		feature        string
+		shouldHaveNote bool
 	}{
 		{
 			"MySQL FULL_OUTER_JOIN note",
@@ -521,7 +527,7 @@ func TestQueryFeaturesConsistency(t *testing.T) {
 
 	for _, dbType := range databases {
 		qf := GetQueryFeatures(dbType)
-		
+
 		// 检查布尔字段的一致性
 		// 注："limit"不是所有数据库都支持（SQL Server用OFFSET...FETCH）
 		supported := []string{
@@ -657,7 +663,7 @@ func TestQueryFeatureMatrixAllDatabases(t *testing.T) {
 func TestPrintQueryFeatureMatrixEmptyDatabases(t *testing.T) {
 	// 不传递参数，应该使用默认的4个数据库
 	matrix := PrintQueryFeatureMatrix()
-	
+
 	// 应该包含默认的4个数据库
 	defaultDbs := []string{"postgres", "mysql", "sqlite", "sqlserver"}
 	for _, db := range defaultDbs {

@@ -91,9 +91,9 @@ func TestSQLQueryConstructorComparisonOperators(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name     string
-		cond     Condition
-		expectOp string
+		name      string
+		cond      Condition
+		expectOp  string
 		expectVal interface{}
 	}{
 		{"Gt (>)", Gt("age", 18), ">", 18},
@@ -340,16 +340,156 @@ func TestSQLQueryConstructorOrderBy(t *testing.T) {
 	t.Logf("✓ ORDER BY: %s", sql)
 }
 
+func TestSQLQueryConstructorJoin_PostgreSQL_DefaultASAlias(t *testing.T) {
+	schema := NewBaseSchema("public.users")
+	dialect := NewPostgreSQLDialect()
+	qc := NewSQLQueryConstructor(schema, dialect).
+		FromAlias("u").
+		Join("public.orders", "u.id = orders.user_id")
+
+	ctx := context.Background()
+	sql, args, err := qc.Build(ctx)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if !strings.Contains(sql, `FROM "public"."users" AS "u"`) {
+		t.Fatalf("expected FROM alias with AS for postgres, got: %s", sql)
+	}
+	if !strings.Contains(sql, `INNER JOIN "public"."orders" AS "orders" ON u.id = orders.user_id`) {
+		t.Fatalf("expected JOIN auto alias with AS for postgres, got: %s", sql)
+	}
+	if len(args) != 0 {
+		t.Fatalf("expected no args, got: %v", args)
+	}
+}
+
+func TestSQLQueryConstructorJoin_SQLServer_DefaultASAlias(t *testing.T) {
+	schema := NewBaseSchema("dbo.users")
+	dialect := NewSQLServerDialect()
+	qc := NewSQLQueryConstructor(schema, dialect).
+		FromAlias("u").
+		LeftJoin("dbo.orders", "u.id = orders.user_id")
+
+	ctx := context.Background()
+	sql, _, err := qc.Build(ctx)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if !strings.Contains(sql, "FROM [dbo].[users] AS [u]") {
+		t.Fatalf("expected FROM alias with AS for sqlserver, got: %s", sql)
+	}
+	if !strings.Contains(sql, "LEFT JOIN [dbo].[orders] AS [orders] ON u.id = orders.user_id") {
+		t.Fatalf("expected JOIN auto alias with AS for sqlserver, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorJoin_MissingOnClause(t *testing.T) {
+	schema := NewBaseSchema("users")
+	dialect := NewMySQLDialect()
+	qc := NewSQLQueryConstructor(schema, dialect).
+		Join("orders", "")
+
+	_, _, err := qc.Build(context.Background())
+	if err == nil {
+		t.Fatal("expected error for missing ON clause")
+	}
+	if !strings.Contains(err.Error(), "requires ON clause") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSQLQueryConstructorJoin_SQLServer_PreferTempTableStrategy(t *testing.T) {
+	schema := NewBaseSchema("dbo.users")
+	dialect := NewSQLServerDialect()
+	qc := NewSQLQueryConstructor(schema, dialect)
+
+	query := qc.
+		FromAlias("u").
+		CrossTableStrategy(CrossTableStrategyPreferTempTable).
+		Join("dbo.orders", "u.id = orders.user_id")
+
+	sql, _, err := query.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "SELECT * INTO #eit_qb_u") {
+		t.Fatalf("expected temp table materialization SQL, got: %s", sql)
+	}
+	if !strings.Contains(sql, "FROM #eit_qb_u AS [u]") {
+		t.Fatalf("expected final query reading from temp table, got: %s", sql)
+	}
+	if !strings.Contains(sql, "INNER JOIN [dbo].[orders] AS [orders] ON u.id = orders.user_id") {
+		t.Fatalf("expected join clause in rewritten SQL, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorJoin_SQLServer_ForceDirectJoinStrategy(t *testing.T) {
+	schema := NewBaseSchema("dbo.users")
+	dialect := NewSQLServerDialect()
+	qc := NewSQLQueryConstructor(schema, dialect)
+
+	query := qc.
+		FromAlias("u").
+		CrossTableStrategy(CrossTableStrategyForceDirectJoin).
+		Join("dbo.orders", "u.id = orders.user_id")
+
+	sql, _, err := query.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if strings.Contains(sql, "SELECT * INTO #eit_qb_u") {
+		t.Fatalf("force_direct_join should not use temp table rewrite, got: %s", sql)
+	}
+	if !strings.Contains(sql, "FROM [dbo].[users] AS [u] INNER JOIN [dbo].[orders] AS [orders]") {
+		t.Fatalf("expected direct join SQL, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorBuildIR(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("name", TypeString).Build())
+
+	qc := NewSQLQueryConstructor(schema, NewMySQLDialect())
+	qc.Select("id", "name").Where(Eq("name", "alice")).OrderBy("id", "DESC").Limit(10).Offset(20)
+
+	ir, err := qc.BuildIR(context.Background())
+	if err != nil {
+		t.Fatalf("BuildIR failed: %v", err)
+	}
+
+	if ir.Source.Table != "users" {
+		t.Fatalf("expected source table users, got %s", ir.Source.Table)
+	}
+	if len(ir.Projections) != 2 {
+		t.Fatalf("expected 2 projections, got %d", len(ir.Projections))
+	}
+	if len(ir.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d", len(ir.Conditions))
+	}
+	if len(ir.OrderBys) != 1 {
+		t.Fatalf("expected 1 order by, got %d", len(ir.OrderBys))
+	}
+	if ir.Limit == nil || *ir.Limit != 10 {
+		t.Fatalf("expected limit=10, got %+v", ir.Limit)
+	}
+	if ir.Offset == nil || *ir.Offset != 20 {
+		t.Fatalf("expected offset=20, got %+v", ir.Offset)
+	}
+}
+
 // TestSQLQueryConstructorLimitOffset 测试 LIMIT 和 OFFSET
 func TestSQLQueryConstructorLimitOffset(t *testing.T) {
 	schema := NewBaseSchema("users")
 	dialect := NewMySQLDialect()
 
 	testCases := []struct {
-		name          string
-		limit         *int
-		offset        *int
-		expectLimitOK bool
+		name           string
+		limit          *int
+		offset         *int
+		expectLimitOK  bool
 		expectOffsetOK bool
 	}{
 		{"Limit only", intPtr(10), nil, true, false},
@@ -489,9 +629,9 @@ func TestSQLDialectQuoting(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name          string
-		dialect       SQLDialect
-		expectQuote   string
+		name        string
+		dialect     SQLDialect
+		expectQuote string
 	}{
 		{"MySQL", NewMySQLDialect(), "`"},
 		{"PostgreSQL", NewPostgreSQLDialect(), `"`},
@@ -633,7 +773,7 @@ func TestSQLServerDialect(t *testing.T) {
 			func(qc *SQLQueryConstructor) {
 				qc.Where(Eq("name", "John"))
 			},
-			"WHERE [name] = @p1",
+			"WHERE [users].[name] = @p1",
 			"@p1",
 		},
 		{
@@ -786,10 +926,10 @@ func TestSQLServerDialectQuotingComparison(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		name          string
-		dialect       SQLDialect
+		name           string
+		dialect        SQLDialect
 		expectBrackets string
-		expectParam   string
+		expectParam    string
 	}{
 		{"MySQL", NewMySQLDialect(), "`users`", "?"},
 		{"PostgreSQL", NewPostgreSQLDialect(), `"users"`, "$1"},
@@ -816,6 +956,136 @@ func TestSQLServerDialectQuotingComparison(t *testing.T) {
 		}
 
 		t.Logf("✓ %s: %s", tc.name, sql)
+	}
+}
+
+// TestDialectReservedKeywordIdentifiers 测试保留关键字作为字段名/表名时的方言引用
+func TestDialectReservedKeywordIdentifiers(t *testing.T) {
+	schema := NewBaseSchema("order")
+	schema.AddField(NewField("id", TypeInteger).Build())
+	schema.AddField(NewField("order", TypeString).Build())
+
+	ctx := context.Background()
+
+	testCases := []struct {
+		name          string
+		dialect       SQLDialect
+		expectTable   string
+		expectColumn  string
+		expectOrderBy string
+	}{
+		{"MySQL", NewMySQLDialect(), "`order`", "`order`", "ORDER BY `order`.`order` ASC"},
+		{"PostgreSQL", NewPostgreSQLDialect(), `"order"`, `"order"`, `ORDER BY "order"."order" ASC`},
+		{"SQLite", NewSQLiteDialect(), "`order`", "`order`", "ORDER BY `order`.`order` ASC"},
+		{"SQL Server", NewSQLServerDialect(), "[order]", "[order]", "ORDER BY [order].[order] ASC"},
+	}
+
+	for _, tc := range testCases {
+		qc := NewSQLQueryConstructor(schema, tc.dialect)
+		qc.Select("order").Where(Eq("order", "created")).OrderBy("order", "ASC")
+
+		sql, args, err := qc.Build(ctx)
+		if err != nil {
+			t.Errorf("%s: Build failed: %v", tc.name, err)
+			continue
+		}
+
+		if !strings.Contains(sql, tc.expectTable) {
+			t.Errorf("%s: expected table identifier %s in SQL: %s", tc.name, tc.expectTable, sql)
+		}
+		if !strings.Contains(sql, tc.expectColumn) {
+			t.Errorf("%s: expected column identifier %s in SQL: %s", tc.name, tc.expectColumn, sql)
+		}
+		if !strings.Contains(sql, tc.expectOrderBy) {
+			t.Errorf("%s: expected ORDER BY clause %s in SQL: %s", tc.name, tc.expectOrderBy, sql)
+		}
+
+		if len(args) != 1 || args[0] != "created" {
+			t.Errorf("%s: expected args [created], got %v", tc.name, args)
+		}
+	}
+}
+
+// TestDialectQualifiedIdentifiers 测试 schema.table 与 table.column 的限定标识符引用
+func TestDialectQualifiedIdentifiers(t *testing.T) {
+	schema := NewBaseSchema("public.orders")
+	schema.AddField(NewField("id", TypeInteger).Build())
+	schema.AddField(NewField("order", TypeString).Build())
+
+	ctx := context.Background()
+
+	testCases := []struct {
+		name         string
+		dialect      SQLDialect
+		expectTable  string
+		expectColumn string
+	}{
+		{"MySQL", NewMySQLDialect(), "`public`.`orders`", "`orders`.`order`"},
+		{"PostgreSQL", NewPostgreSQLDialect(), `"public"."orders"`, `"orders"."order"`},
+		{"SQLite", NewSQLiteDialect(), "`public`.`orders`", "`orders`.`order`"},
+		{"SQL Server", NewSQLServerDialect(), "[public].[orders]", "[orders].[order]"},
+	}
+
+	for _, tc := range testCases {
+		qc := NewSQLQueryConstructor(schema, tc.dialect)
+		qc.Select("orders.order").Where(Eq("orders.order", "created"))
+
+		sql, _, err := qc.Build(ctx)
+		if err != nil {
+			t.Errorf("%s: Build failed: %v", tc.name, err)
+			continue
+		}
+
+		if !strings.Contains(sql, tc.expectTable) {
+			t.Errorf("%s: expected qualified table %s in SQL: %s", tc.name, tc.expectTable, sql)
+		}
+		if !strings.Contains(sql, tc.expectColumn) {
+			t.Errorf("%s: expected qualified column %s in SQL: %s", tc.name, tc.expectColumn, sql)
+		}
+	}
+}
+
+// TestAutoQualifiedBareIdentifiers 测试裸字段自动补 table 前缀
+func TestAutoQualifiedBareIdentifiers(t *testing.T) {
+	schema := NewBaseSchema("public.orders")
+	schema.AddField(NewField("id", TypeInteger).Build())
+	schema.AddField(NewField("order", TypeString).Build())
+
+	ctx := context.Background()
+
+	testCases := []struct {
+		name         string
+		dialect      SQLDialect
+		expectTable  string
+		expectColumn string
+	}{
+		{"MySQL", NewMySQLDialect(), "`public`.`orders`", "`orders`.`order`"},
+		{"PostgreSQL", NewPostgreSQLDialect(), `"public"."orders"`, `"orders"."order"`},
+		{"SQLite", NewSQLiteDialect(), "`public`.`orders`", "`orders`.`order`"},
+		{"SQL Server", NewSQLServerDialect(), "[public].[orders]", "[orders].[order]"},
+	}
+
+	for _, tc := range testCases {
+		qc := NewSQLQueryConstructor(schema, tc.dialect)
+		qc.Select("order").Where(Eq("order", "created")).OrderBy("order", "ASC")
+
+		sql, args, err := qc.Build(ctx)
+		if err != nil {
+			t.Errorf("%s: Build failed: %v", tc.name, err)
+			continue
+		}
+
+		if !strings.Contains(sql, tc.expectTable) {
+			t.Errorf("%s: expected qualified table %s in SQL: %s", tc.name, tc.expectTable, sql)
+		}
+
+		if strings.Count(sql, tc.expectColumn) < 3 {
+			t.Errorf("%s: expected auto-qualified column %s in SELECT/WHERE/ORDER BY, got: %s", tc.name, tc.expectColumn, sql)
+		}
+
+		if len(args) != 1 || args[0] != "created" {
+			t.Errorf("%s: expected args [created], got %v", tc.name, args)
+		}
 	}
 }
 

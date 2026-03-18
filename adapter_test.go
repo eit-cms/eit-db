@@ -39,22 +39,13 @@ func TestSQLiteAdapterInitialization(t *testing.T) {
 		t.Fatalf("Failed to ping SQLite database: %v", err)
 	}
 
-	// 测试 GetGormDB
+	// 测试 GetGormDB（始终禁用）
 	gormDB := repo.GetGormDB()
-	if gormDB == nil {
-		t.Fatal("GetGormDB() returned nil for SQLite adapter")
+	if gormDB != nil {
+		t.Fatal("GetGormDB() should always return nil")
 	}
 
-	// 验证 GORM 实例的有效性
-	sqlDB, err := gormDB.DB()
-	if err != nil {
-		t.Fatalf("Failed to get sql.DB from GORM: %v", err)
-	}
-	if err := sqlDB.PingContext(ctx); err != nil {
-		t.Fatalf("Ping failed: %v", err)
-	}
-
-	t.Log("✓ SQLite adapter initialization and GetGormDB test passed")
+	t.Log("✓ SQLite adapter initialization passed with no GORM exposure")
 }
 
 // TestInitDB 测试 InitDB 函数（使用配置文件）
@@ -92,10 +83,10 @@ func TestInitDB(t *testing.T) {
 		t.Fatalf("Failed to ping database initialized by InitDB: %v", err)
 	}
 
-	// 测试 GetGormDB
+	// GetGormDB 应始终禁用
 	gormDB := repo.GetGormDB()
-	if gormDB == nil {
-		t.Fatal("GetGormDB() returned nil for database initialized by InitDB")
+	if gormDB != nil {
+		t.Fatal("GetGormDB() should always return nil")
 	}
 
 	t.Log("✓ InitDB with YAML config test passed")
@@ -112,6 +103,15 @@ func TestConfigFileFormats(t *testing.T) {
 		content string
 		ext     string
 	}{
+		{
+			name: "YAML with adapter-specific nested config",
+			content: `database:
+  adapter: sqlite
+  sqlite:
+    path: /tmp/eit-nested-sqlite.db
+`,
+			ext: ".yaml",
+		},
 		{
 			name: "YAML with nested database config",
 			content: `database:
@@ -157,7 +157,7 @@ func TestConfigFileFormats(t *testing.T) {
 				t.Fatalf("Expected adapter 'sqlite', got '%s'", config.Adapter)
 			}
 
-			if config.Database == "" {
+			if config.ResolvedSQLiteConfig().Path == "" && config.Database == "" {
 				t.Fatal("Database path should not be empty")
 			}
 
@@ -169,8 +169,8 @@ func TestConfigFileFormats(t *testing.T) {
 			defer repo.Close()
 
 			gormDB := repo.GetGormDB()
-			if gormDB == nil {
-				t.Fatal("GetGormDB() returned nil")
+			if gormDB != nil {
+				t.Fatal("GetGormDB() should always return nil")
 			}
 
 			t.Logf("✓ Config format %s test passed", tc.ext)
@@ -204,29 +204,20 @@ func TestConnectionPoolConfiguration(t *testing.T) {
 	}
 	defer repo.Close()
 
-	gormDB := repo.GetGormDB()
-	if gormDB == nil {
-		t.Fatal("GetGormDB() returned nil")
+	if repo.GetGormDB() != nil {
+		t.Fatal("GetGormDB() should always return nil")
 	}
 
-	sqlDB, err := gormDB.DB()
-	if err != nil {
-		t.Fatalf("Failed to get sql.DB: %v", err)
-	}
-
-	// SQLite 连接池配置验证
-	stats := sqlDB.Stats()
-	if stats.OpenConnections > 15 {
-		t.Logf("Warning: Expected MaxOpenConns around 15, got %d", stats.OpenConnections)
+	if err := repo.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping failed: %v", err)
 	}
 
 	t.Logf("✓ Connection pool configuration test passed")
-	t.Logf("  Pool stats: OpenConnections=%d, MaxOpenConns would be set to 15", stats.OpenConnections)
 }
 
 // TestAllAdaptersAvailable 测试所有适配器都已注册
 func TestAllAdaptersAvailable(t *testing.T) {
-	adapters := []string{"sqlite", "mysql", "postgres"}
+	adapters := []string{"sqlite", "mysql", "postgres", "neo4j"}
 	ctx := context.Background()
 
 	for _, adapterName := range adapters {
@@ -256,6 +247,13 @@ func TestAllAdaptersAvailable(t *testing.T) {
 				config.Password = "postgres"
 				config.Database = "postgres"
 				config.SSLMode = "disable"
+			case "neo4j":
+				config.Neo4j = &Neo4jConnectionConfig{
+					URI:      "neo4j://localhost:7687",
+					Username: "neo4j",
+					Password: "password",
+					Database: "neo4j",
+				}
 			}
 
 			repo, err := NewRepository(config)
@@ -266,20 +264,14 @@ func TestAllAdaptersAvailable(t *testing.T) {
 				}
 				defer repo.Close()
 
-				gormDB := repo.GetGormDB()
-				if gormDB == nil {
-					t.Fatalf("GetGormDB() returned nil for %s", adapterName)
+				if repo.GetGormDB() != nil {
+					t.Fatalf("GetGormDB() should always return nil for %s", adapterName)
 				}
-
-				sqlDB, err := gormDB.DB()
-				if err != nil {
-					t.Fatalf("Failed to get sql.DB: %v", err)
-				}
-				if err := sqlDB.PingContext(ctx); err != nil {
-					t.Fatalf("GORM ping failed for %s: %v", adapterName, err)
+				if err := repo.Ping(ctx); err != nil {
+					t.Fatalf("Ping failed for %s: %v", adapterName, err)
 				}
 			} else {
-				// For MySQL and PostgreSQL, just verify the adapter is registered
+				// For network databases, just verify adapter is registered; connection may fail if DB is not running
 				if err != nil {
 					t.Logf("Adapter %s created but connection failed (expected if DB not running): %v", adapterName, err)
 				} else {
@@ -366,15 +358,11 @@ func TestConcurrentGetGormDB(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(id int) {
 			gormDB := repo.GetGormDB()
-			if gormDB == nil {
-				t.Errorf("Goroutine %d: GetGormDB() returned nil", id)
+			if gormDB != nil {
+				t.Errorf("Goroutine %d: GetGormDB() should always return nil", id)
 			}
-
-			// 执行简单查询验证连接有效
-			var count int64
-			result := gormDB.Raw("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").Scan(&count)
-			if result.Error != nil {
-				t.Errorf("Goroutine %d: Query failed: %v", id, result.Error)
+			if err := repo.Ping(context.Background()); err != nil {
+				t.Errorf("Goroutine %d: Ping failed: %v", id, err)
 			}
 
 			done <- true

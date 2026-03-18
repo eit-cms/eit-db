@@ -1,27 +1,27 @@
 package adapter_tests
 
 import (
+	"database/sql"
 	"os"
 	"testing"
 
 	db "github.com/eit-cms/eit-db"
-	"gorm.io/gorm"
 )
 
 type User struct {
-	ID    uint   `gorm:"primaryKey"`
+	ID    int64
 	Name  string
-	Email string `gorm:"uniqueIndex"`
+	Email string
 	Age   int
 }
 
 type Post struct {
-	ID     uint
+	ID     int64
 	Title  string
-	UserID uint
+	UserID int64
 }
 
-func setupTestDB(t *testing.T) (*gorm.DB, func()) {
+func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	tmpFile := "./test.db"
 	os.Remove(tmpFile)
 
@@ -34,29 +34,51 @@ func setupTestDB(t *testing.T) (*gorm.DB, func()) {
 		t.Fatalf("Failed: %v", err)
 	}
 
-	gormDB := adapter.GetRawConn().(*gorm.DB)
-	if err := gormDB.AutoMigrate(&User{}, &Post{}); err != nil {
-		t.Fatalf("Migrate failed: %v", err)
+	rawConn := adapter.GetRawConn()
+	sqlDB, ok := rawConn.(*sql.DB)
+	if !ok || sqlDB == nil {
+		t.Fatalf("expected *sql.DB from GetRawConn, got %T", rawConn)
 	}
 
-	return gormDB, func() {
+	if _, err := sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL,
+			email TEXT NOT NULL UNIQUE,
+			age INTEGER NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create users table failed: %v", err)
+	}
+
+	if _, err := sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS posts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			title TEXT NOT NULL,
+			user_id INTEGER NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create posts table failed: %v", err)
+	}
+
+	return sqlDB, func() {
 		adapter.Close()
 		os.Remove(tmpFile)
 	}
 }
 
 func TestBasicCRUD(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	user := &User{Name: "Alice", Email: "alice@test.com", Age: 25}
-
-	if err := gormDB.Create(user).Error; err != nil {
+	res, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?)", "Alice", "alice@test.com", 25)
+	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
+	userID, _ := res.LastInsertId()
 
 	var r User
-	if err := gormDB.First(&r, user.ID).Error; err != nil {
+	if err := sqlDB.QueryRow("SELECT id, name, email, age FROM users WHERE id = ?", userID).Scan(&r.ID, &r.Name, &r.Email, &r.Age); err != nil {
 		t.Fatalf("Find failed: %v", err)
 	}
 
@@ -64,142 +86,195 @@ func TestBasicCRUD(t *testing.T) {
 		t.Errorf("Expected Alice, got %s", r.Name)
 	}
 
-	r.Age = 26
-	if err := gormDB.Save(&r).Error; err != nil {
+	if _, err := sqlDB.Exec("UPDATE users SET age = ? WHERE id = ?", 26, userID); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
 
-	if err := gormDB.Delete(&r).Error; err != nil {
+	if _, err := sqlDB.Exec("DELETE FROM users WHERE id = ?", userID); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 }
 
 func TestQueryWhere(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	users := []User{
-		{Name: "Alice", Email: "alice@x.com", Age: 25},
-		{Name: "Bob", Email: "bob@x.com", Age: 30},
-	}
-	for _, u := range users {
-		gormDB.Create(&u)
+	if _, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?), (?, ?, ?)",
+		"Alice", "alice@x.com", 25,
+		"Bob", "bob@x.com", 30,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
 	}
 
-	var results []User
-	gormDB.Where("age > ?", 27).Find(&results)
-	if len(results) != 1 {
-		t.Errorf("Expected 1, got %d", len(results))
+	var count int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE age > ?", 27).Scan(&count); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("Expected 1, got %d", count)
 	}
 }
 
 func TestWhereIN(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	for i, name := range []string{"A", "B", "C"} {
-		gormDB.Create(&User{Name: name, Email: "e" + string(rune(i)), Age: 20 + i})
+	if _, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?), (?, ?, ?), (?, ?, ?)",
+		"A", "a@test.com", 20,
+		"B", "b@test.com", 21,
+		"C", "c@test.com", 22,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
 	}
 
-	var results []User
-	gormDB.Where("name IN ?", []string{"A", "B"}).Find(&results)
-	if len(results) != 2 {
-		t.Errorf("Expected 2, got %d", len(results))
+	var count int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE name IN (?, ?)", "A", "B").Scan(&count); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Expected 2, got %d", count)
 	}
 }
 
 func TestBetween(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	for i := 0; i < 5; i++ {
-		gormDB.Create(&User{Name: "U" + string(rune(48+i)), Email: "b" + string(rune(48+i)), Age: 20 + i*5})
+	if _, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+		"U0", "u0@test.com", 20,
+		"U1", "u1@test.com", 25,
+		"U2", "u2@test.com", 30,
+		"U3", "u3@test.com", 35,
+		"U4", "u4@test.com", 40,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
 	}
 
-	var results []User
-	gormDB.Where("age BETWEEN ? AND ?", 25, 35).Find(&results)
-	if len(results) < 1 {
-		t.Errorf("Expected at least 1, got %d", len(results))
+	var count int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE age BETWEEN ? AND ?", 25, 35).Scan(&count); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("Expected 3, got %d", count)
 	}
 }
 
 func TestDistinct(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	gormDB.Create(&User{Name: "A1", Email: "a1@x.com", Age: 25})
-	gormDB.Create(&User{Name: "A2", Email: "a2@x.com", Age: 25})
-	gormDB.Create(&User{Name: "B1", Email: "b1@x.com", Age: 30})
+	if _, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?), (?, ?, ?), (?, ?, ?)",
+		"A1", "a1@x.com", 25,
+		"A2", "a2@x.com", 25,
+		"B1", "b1@x.com", 30,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
 
-	var ages []int
-	gormDB.Model(&User{}).Distinct("age").Pluck("age", &ages)
+	rows, err := sqlDB.Query("SELECT DISTINCT age FROM users")
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	defer rows.Close()
 
-	if len(ages) != 2 {
-		t.Errorf("Expected 2 distinct ages, got %d", len(ages))
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if count != 2 {
+		t.Errorf("Expected 2 distinct ages, got %d", count)
 	}
 }
 
 func TestWindowFunction(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	u := &User{Name: "Alice", Email: "w@test.com", Age: 25}
-	gormDB.Create(u)
+	res, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?)", "Alice", "w@test.com", 25)
+	if err != nil {
+		t.Fatalf("insert user failed: %v", err)
+	}
+	userID, _ := res.LastInsertId()
 
-	for i := 0; i < 3; i++ {
-		gormDB.Create(&Post{Title: "P" + string(rune(48+i)), UserID: u.ID})
+	if _, err := sqlDB.Exec("INSERT INTO posts(title, user_id) VALUES(?, ?), (?, ?), (?, ?)",
+		"P0", userID,
+		"P1", userID,
+		"P2", userID,
+	); err != nil {
+		t.Fatalf("insert posts failed: %v", err)
 	}
 
 	type R struct {
 		Title  string
 		RowNum int
 	}
-	var results []R
-	gormDB.Raw("SELECT title, ROW_NUMBER() OVER (ORDER BY id) as row_num FROM posts").Scan(&results)
+	rows, err := sqlDB.Query("SELECT title, ROW_NUMBER() OVER (ORDER BY id) as row_num FROM posts")
+	if err != nil {
+		t.Fatalf("window query failed: %v", err)
+	}
+	defer rows.Close()
 
-	if len(results) != 3 {
-		t.Errorf("Expected 3, got %d", len(results))
+	count := 0
+	for rows.Next() {
+		var r R
+		if err := rows.Scan(&r.Title, &r.RowNum); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		count++
+	}
+
+	if count != 3 {
+		t.Errorf("Expected 3, got %d", count)
 	}
 }
 
 func TestCTE(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	users := []User{
-		{Name: "X", Email: "x1@c.com", Age: 25},
-		{Name: "Y", Email: "y1@c.com", Age: 35},
+	if _, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?), (?, ?, ?)",
+		"X", "x1@c.com", 25,
+		"Y", "y1@c.com", 35,
+	); err != nil {
+		t.Fatalf("seed failed: %v", err)
 	}
-	for _, u := range users {
-		gormDB.Create(&u)
-	}
-
-	type R struct {
-		Name string
-		Age  int
-	}
-	var results []R
 
 	query := "WITH adults AS (SELECT name, age FROM users WHERE age > 30) SELECT * FROM adults"
-	gormDB.Raw(query).Scan(&results)
+	rows, err := sqlDB.Query(query)
+	if err != nil {
+		t.Fatalf("cte query failed: %v", err)
+	}
+	defer rows.Close()
 
-	if len(results) != 1 {
-		t.Errorf("Expected 1, got %d", len(results))
+	count := 0
+	for rows.Next() {
+		count++
+	}
+
+	if count != 1 {
+		t.Errorf("Expected 1, got %d", count)
 	}
 }
 
 func TestUpsert(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	user := &User{Name: "Test", Email: "upsert@test.com", Age: 20}
-	gormDB.Create(user)
+	res, err := sqlDB.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?)", "Test", "upsert@test.com", 20)
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	userID, _ := res.LastInsertId()
 
 	query := "INSERT INTO users (id, name, email, age) VALUES (?, ?, ?, ?) ON CONFLICT(email) DO UPDATE SET name = excluded.name, age = excluded.age"
-	gormDB.Exec(query, user.ID, "Updated", "upsert@test.com", 25)
+	if _, err := sqlDB.Exec(query, userID, "Updated", "upsert@test.com", 25); err != nil {
+		t.Fatalf("upsert failed: %v", err)
+	}
 
 	var u User
-	gormDB.First(&u, user.ID)
+	if err := sqlDB.QueryRow("SELECT id, name, email, age FROM users WHERE id = ?", userID).Scan(&u.ID, &u.Name, &u.Email, &u.Age); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
 
 	if u.Name != "Updated" || u.Age != 25 {
 		t.Errorf("Upsert failed: %v %d", u.Name, u.Age)
@@ -207,29 +282,44 @@ func TestUpsert(t *testing.T) {
 }
 
 func TestTransaction(t *testing.T) {
-	gormDB, cleanup := setupTestDB(t)
+	sqlDB, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	tx := gormDB.Begin()
-	u := &User{Name: "TX", Email: "tx@test.com", Age: 30}
-	tx.Create(u)
-	tx.Commit()
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		t.Fatalf("begin tx failed: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?)", "TX", "tx@test.com", 30); err != nil {
+		t.Fatalf("insert in tx failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit failed: %v", err)
+	}
 
 	var found User
-	gormDB.Where("email = ?", "tx@test.com").First(&found)
+	if err := sqlDB.QueryRow("SELECT id, name, email, age FROM users WHERE email = ?", "tx@test.com").Scan(&found.ID, &found.Name, &found.Email, &found.Age); err != nil {
+		t.Fatalf("query committed row failed: %v", err)
+	}
 	if found.Name != "TX" {
 		t.Error("Commit failed")
 	}
 
-	tx = gormDB.Begin()
-	u2 := &User{Name: "RB", Email: "rb@test.com", Age: 30}
-	tx.Create(u2)
-	tx.Rollback()
+	tx, err = sqlDB.Begin()
+	if err != nil {
+		t.Fatalf("begin tx failed: %v", err)
+	}
+	if _, err := tx.Exec("INSERT INTO users(name, email, age) VALUES(?, ?, ?)", "RB", "rb@test.com", 30); err != nil {
+		t.Fatalf("insert in rollback tx failed: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback failed: %v", err)
+	}
 
-	var notFound User
-	err := gormDB.Where("email = ?", "rb@test.com").First(&notFound).Error
-	if err == nil {
+	var count int
+	if err := sqlDB.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", "rb@test.com").Scan(&count); err != nil {
+		t.Fatalf("query rollback row failed: %v", err)
+	}
+	if count != 0 {
 		t.Error("Rollback failed")
 	}
 }
-

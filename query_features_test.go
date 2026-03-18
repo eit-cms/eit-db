@@ -13,50 +13,60 @@ func TestQueryFeatures(t *testing.T) {
 		{
 			"postgres",
 			map[string]bool{
-				"in_range":           true,
-				"recursive_cte":      true,
-				"window_func":        true,
-				"full_outer_join":    true,
-				"full_text_search":   true,
-				"json_operators":     true,
+				"in_range":         true,
+				"recursive_cte":    true,
+				"window_func":      true,
+				"full_outer_join":  true,
+				"full_text_search": true,
+				"json_operators":   true,
 			},
 		},
 		{
 			"mysql",
 			map[string]bool{
-				"in_range":           true,
-				"recursive_cte":      true,
-				"window_func":        true,
-				"full_outer_join":    false, // ❌ MySQL 不支持
-				"except":             false, // ❌ MySQL 不支持
-				"intersect":          false, // ❌ MySQL 不支持
-				"full_text_search":   true,
-				"json_operators":     true,
+				"in_range":         true,
+				"recursive_cte":    true,
+				"window_func":      true,
+				"full_outer_join":  false, // ❌ MySQL 不支持
+				"except":           false, // ❌ MySQL 不支持
+				"intersect":        false, // ❌ MySQL 不支持
+				"full_text_search": true,
+				"json_operators":   true,
 			},
 		},
 		{
 			"sqlite",
 			map[string]bool{
-				"in_range":           true,
-				"recursive_cte":      true,
-				"window_func":        true,
-				"full_outer_join":    false, // ❌ SQLite 不支持
-				"full_text_search":   false, // ❌ SQLite 需要 FTS 扩展
-				"regex_match":        false, // ❌ SQLite 需要注册函数
-				"json_operators":     true,
+				"in_range":         true,
+				"recursive_cte":    true,
+				"window_func":      true,
+				"full_outer_join":  false, // ❌ SQLite 不支持
+				"full_text_search": false, // ❌ SQLite 需要 FTS 扩展
+				"regex_match":      false, // ❌ SQLite 需要注册函数
+				"json_operators":   true,
 			},
 		},
 		{
 			"sqlserver",
 			map[string]bool{
-				"in_range":           true,
-				"recursive_cte":      true,
-				"window_func":        true,
-				"full_outer_join":    true,
-				"except":             true,
-				"limit":              false, // ❌ SQL Server 用 OFFSET...FETCH
-				"full_text_search":   true,
-				"json_operators":     true,
+				"in_range":         true,
+				"recursive_cte":    true,
+				"window_func":      true,
+				"full_outer_join":  true,
+				"except":           true,
+				"limit":            false, // ❌ SQL Server 用 OFFSET...FETCH
+				"full_text_search": true,
+				"json_operators":   true,
+			},
+		},
+		{
+			"neo4j",
+			map[string]bool{
+				"recursive_cte":    true,
+				"full_text_search": true,
+				"window_func":      false,
+				"json_operators":   false,
+				"join":             false,
 			},
 		},
 	}
@@ -184,6 +194,7 @@ func TestQueryFeaturesWithAdapter(t *testing.T) {
 		{"MySQL", &MySQLAdapter{}},
 		{"SQLite", &SQLiteAdapter{}},
 		{"SQL Server", &SQLServerAdapter{}},
+		{"Neo4j", &Neo4jAdapter{}},
 	}
 
 	for _, tc := range adapters {
@@ -194,8 +205,11 @@ func TestQueryFeaturesWithAdapter(t *testing.T) {
 				return
 			}
 
-			// 验证基础特性都支持
+			// 对 SQL 适配器验证基础特性，Neo4j 只验证通用能力。
 			basicFeatures := []string{"in_range", "between", "like", "group_by", "order_by"}
+			if tc.name == "Neo4j" {
+				basicFeatures = []string{"in_range", "between", "group_by", "order_by"}
+			}
 			for _, feat := range basicFeatures {
 				if !qf.HasQueryFeature(feat) {
 					t.Errorf("%s doesn't support basic feature: %s", tc.name, feat)

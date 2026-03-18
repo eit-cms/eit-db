@@ -23,9 +23,9 @@ type Migration struct {
 
 // MigrationLog 迁移日志记录
 type MigrationLog struct {
-	ID        int64
-	Version   string
-	RunOn     time.Time
+	ID         int64
+	Version    string
+	RunOn      time.Time
 	ExecutedAt time.Time
 }
 
@@ -205,17 +205,7 @@ func (m *Migrator) rollbackMigration(ctx context.Context, migration *Migration) 
 
 // createMigrationLogTable 创建迁移日志表
 func (m *Migrator) createMigrationLogTable(ctx context.Context) error {
-	sql := `
-	CREATE TABLE IF NOT EXISTS schema_migrations (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		version VARCHAR(50) NOT NULL UNIQUE,
-		description TEXT,
-		executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-	);
-	`
-
-	_, err := m.repo.Exec(ctx, sql)
-	return err
+	return ensureFrameworkTableUsingSchema(ctx, m.repo, buildSchemaMigrationsSchemaV1())
 }
 
 // getExecutedMigrations 获取已执行的迁移

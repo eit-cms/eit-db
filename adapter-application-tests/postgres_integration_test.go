@@ -8,14 +8,20 @@ import (
 )
 
 func setupPostgresRepo(t *testing.T) (*db.Repository, func()) {
-	config := &db.Config{
-		Adapter:  "postgres",
-		Host:     getEnv("POSTGRES_HOST", "localhost"),
-		Port:     getEnvInt("POSTGRES_PORT", 5432),
-		Username: getEnv("POSTGRES_USER", "testuser"),
-		Password: getEnv("POSTGRES_PASSWORD", "testpass"),
-		Database: getEnv("POSTGRES_DB", "testdb"),
-		SSLMode:  getEnv("POSTGRES_SSLMODE", "disable"),
+	config, err := db.LoadConfigFromEnvWithDefaults("postgres", &db.Config{
+		Adapter: "postgres",
+		Postgres: &db.PostgresConnectionConfig{
+			Host:     "localhost",
+			Port:     55432,
+			Username: "testuser",
+			Password: "testpass",
+			Database: "testdb",
+			SSLMode:  "disable",
+		},
+	})
+	if err != nil {
+		t.Skipf("PostgreSQL 配置无效: %v", err)
+		return nil, nil
 	}
 
 	repo, err := db.NewRepository(config)
@@ -97,4 +103,3 @@ func TestPostgresSchemaMigration(t *testing.T) {
 		t.Fatalf("表已删除，预期查询失败")
 	}
 }
-
