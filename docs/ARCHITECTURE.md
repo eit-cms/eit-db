@@ -135,6 +135,8 @@ if qf.HasQueryFeature("json_path") {
 - **API 稳定性优先**：对外 API 不暴露底层实现细节。
 - **功能可验证**：所有特性声明必须可测试（后端与应用层测试区分）。
 - **跨数据库一致性**：能力差异通过声明、派发与降级统一。
+- **框架工具表与动态表 DDL 统一**：框架内部表（如 migration 日志）与动态表的建表路径统一复用 Schema Builder，避免在 Adapter 中维护并行手写 DDL。
+- **校验 locale 配置统一入口**：validation locale 由 `Config.validation` 在 `NewRepository` 初始化阶段统一应用；`default_locale` 必须属于 `enabled_locales`，未启用 locale 不能成为运行时当前 locale。
 
 ## 5. 与其他文档的关系
 

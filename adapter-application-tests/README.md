@@ -2,6 +2,12 @@
 
 本目录包含适用于所有数据库适配器的集成测试套件。
 
+## 范围说明
+
+- 本目录用于验证 Adapter 查询/方言能力与跨库兼容行为。
+- 这里出现的事务或 SQL 用法属于测试场景，不代表业务层默认写路径建议。
+- 业务代码默认写入入口请使用 `Repository.NewChangesetExecutor` 或 `Repository.WithChangeset`。
+
 ## 项目结构
 
 - `sqlite_integration_test.go` - SQLite适配器集成测试（无依赖，可直接运行）
@@ -49,14 +55,17 @@ docker run --name postgres-test \
   -e POSTGRES_USER=testuser \
   -e POSTGRES_PASSWORD=testpass \
   -e POSTGRES_DB=testdb \
-  -p 5432:5432 \
+  -p 55432:5432 \
   postgres:15-alpine
 
 # 设置环境变量
 export POSTGRES_USER=testuser
 export POSTGRES_PASSWORD=testpass
 export POSTGRES_DB=testdb
-export POSTGRES_DSN="postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable"
+export POSTGRES_DSN="postgres://testuser:testpass@localhost:55432/testdb?sslmode=disable"
+
+# 连接细节可按本地环境自定义（例如改端口、主机、用户名），不要求固定端口。
+# 若设置了 POSTGRES_DSN，将优先使用 DSN。
 
 # 运行测试
 go test -v -run Postgres
@@ -91,6 +100,8 @@ export MYSQL_USER=testuser
 export MYSQL_PASSWORD=testpass
 export MYSQL_DB=testdb
 export MYSQL_DSN="testuser:testpass@tcp(localhost:3306)/testdb"
+
+# 若设置 MYSQL_DSN，将优先使用 DSN；否则读取 MYSQL_HOST/MYSQL_PORT 等拆分字段。
 
 # 运行测试
 go test -v -run MySQL
@@ -180,7 +191,7 @@ services:
       POSTGRES_PASSWORD: testpass
       POSTGRES_DB: testdb
     ports:
-      - "5432:5432"
+      - "55432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U testuser"]
       interval: 10s
@@ -210,7 +221,7 @@ services:
 POSTGRES_USER=testuser
 POSTGRES_PASSWORD=testpass
 POSTGRES_DB=testdb
-POSTGRES_DSN=postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable
+POSTGRES_DSN=postgres://testuser:testpass@localhost:55432/testdb?sslmode=disable
 
 # MySQL
 MYSQL_HOST=localhost
