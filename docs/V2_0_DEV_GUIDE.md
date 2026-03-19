@@ -13,8 +13,9 @@
 2. [编码规范与项目结构](#编码规范与项目结构)
 3. [测试策略](#测试策略)
 4. [关键组件实现指南](#关键组件实现指南)
-5. [版本验证清单](#版本验证清单)
-6. [故障排查](#故障排查)
+5. [SQL 默认值方言兼容规范](#sql-默认值方言兼容规范)
+6. [版本验证清单](#版本验证清单)
+7. [故障排查](#故障排查)
 
 ---
 
@@ -1474,6 +1475,70 @@ func (ca *CacheActor) OnLinkingUpdated(event *LinkingUpdatedEvent) error {
     return ca.cache.Invalidate(event.AffectedSymbols)
 }
 ```
+
+---
+
+## SQL 默认值方言兼容规范
+
+### 背景
+
+在 v1.0 的迁移路径中，曾出现字符串默认值未按 SQL 字面量输出，导致 PostgreSQL 将默认值解析为标识符/列引用，触发 SQLSTATE 0A000 类问题。
+
+从现在开始，所有迁移 DDL 默认值生成遵循本节规范。
+
+### 统一规则
+
+1. 字符串默认值
+- 输入为普通字符串（如 `active`）时，必须输出为 SQL 字符串字面量（`DEFAULT 'active'`）。
+- 输入已带引号（如 `'guest'`）时，保持原样，避免双重包裹。
+
+2. SQL 表达式默认值
+- 已知表达式（如 `CURRENT_TIMESTAMP`、`now()`、`nextval(...)`、`INTERVAL ...`、包含 `::` 的类型转换）必须保持原样，不可加字符串引号。
+
+3. 布尔默认值
+- PostgreSQL/MySQL/SQLite：使用 `TRUE` / `FALSE`。
+- SQL Server（BIT 列）：使用 `1` / `0`。
+
+4. 空字符串默认值
+- 统一输出为 `DEFAULT ''`。
+
+### 推荐写法
+
+```go
+// 推荐：业务字符串用普通字符串输入，由 migration 层做方言安全格式化
+schema.AddField(&db.Field{Name: "status", Type: db.TypeString, Null: false, Default: "active"})
+
+// 推荐：SQL 表达式按表达式输入
+schema.AddField(&db.Field{Name: "created_at", Type: db.TypeTime, Null: false, Default: "CURRENT_TIMESTAMP"})
+
+// 兼容：历史代码已写成带引号字符串也可继续使用
+schema.AddField(&db.Field{Name: "nickname", Type: db.TypeString, Null: false, Default: "'guest'"})
+```
+
+### 禁止写法
+
+```go
+// 禁止：绕开 migration 格式化层手工拼接 DEFAULT 子句
+column += " DEFAULT " + fmt.Sprint(field.Default)
+```
+
+### 测试要求
+
+每次修改 migration 默认值逻辑，至少运行以下测试：
+
+```bash
+# 主模块：默认值方言渲染
+go test ./... -run 'TestBuildCreateTableSQL_DefaultStringIsQuotedAcrossDialects|TestBuildCreateTableSQL_DefaultExpressionPreserved|TestBuildCreateTableSQL_SQLServerBoolDefaultUsesBitLiteral|TestBuildCreateTableSQL_PreQuotedStringDefaultCompatible'
+
+# 应用测试模块：PostgreSQL 真实迁移行为
+cd adapter-application-tests
+go test ./... -run TestPostgresSchemaMigration_DefaultStringLiteralApplied -v
+```
+
+### 关联用例
+
+- 单元测试：`migration_v2_default_value_test.go`
+- 集成测试：`adapter-application-tests/postgres_integration_test.go`
 
 ---
 
