@@ -616,7 +616,7 @@ type RawSQLMigration struct {
 	*BaseMigration
 	upSQL   []string
 	downSQL []string
-	adapter string // 可选：指定特定的 adapter
+	adapter string // 必填：指定目标 adapter
 }
 
 // NewRawSQLMigration 创建原始 SQL 迁移
@@ -642,12 +642,16 @@ func (m *RawSQLMigration) AddDownSQL(sql string) *RawSQLMigration {
 
 // ForAdapter 指定 adapter
 func (m *RawSQLMigration) ForAdapter(adapter string) *RawSQLMigration {
-	m.adapter = adapter
+	m.adapter = normalizeMigrationAdapterName(adapter)
 	return m
 }
 
 // Up 执行迁移
 func (m *RawSQLMigration) Up(ctx context.Context, repo *Repository) error {
+	if err := m.validateAdapterBinding(repo); err != nil {
+		return err
+	}
+
 	for _, sql := range m.upSQL {
 		if _, err := repo.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("failed to execute SQL: %s, error: %w", sql, err)
@@ -658,11 +662,34 @@ func (m *RawSQLMigration) Up(ctx context.Context, repo *Repository) error {
 
 // Down 回滚迁移
 func (m *RawSQLMigration) Down(ctx context.Context, repo *Repository) error {
+	if err := m.validateAdapterBinding(repo); err != nil {
+		return err
+	}
+
 	for _, sql := range m.downSQL {
 		if _, err := repo.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("failed to execute SQL: %s, error: %w", sql, err)
 		}
 	}
+	return nil
+}
+
+func (m *RawSQLMigration) validateAdapterBinding(repo *Repository) error {
+	if repo == nil || repo.GetAdapter() == nil {
+		return fmt.Errorf("raw sql migration requires initialized repository")
+	}
+	if strings.TrimSpace(m.adapter) == "" {
+		return fmt.Errorf("raw sql migration %s must call ForAdapter(adapter) before execution", m.Version())
+	}
+
+	current := currentMigrationAdapterName(repo)
+	if current == "" {
+		return fmt.Errorf("failed to resolve current repository adapter for raw sql migration %s", m.Version())
+	}
+	if current != m.adapter {
+		return fmt.Errorf("raw sql migration %s targets adapter %q but current repository adapter is %q", m.Version(), m.adapter, current)
+	}
+
 	return nil
 }
 

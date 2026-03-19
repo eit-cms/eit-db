@@ -147,8 +147,9 @@ func NewMigration_%s_%s() db.MigrationInterface {
 	//
 	// migration.AddDownSQL(`+"`"+`DROP TABLE users`+"`"+`)
 	//
-	// For specific database adapters:
+	// REQUIRED: bind this raw SQL migration to exactly one adapter.
 	// migration.ForAdapter("postgres")
+	// Supported values: "postgres", "mysql", "sqlite", "sqlserver".
 
 	return migration
 }

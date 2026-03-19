@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const migratorV1DisabledMessage = "v1 Migrator is disabled; use MigrationRunner with SchemaMigration or RawSQLMigration.ForAdapter(...)"
+
 // Migration 表示一个数据库迁移
 type Migration struct {
 	// 版本号 (时间戳格式): 20260131100000
@@ -45,6 +47,9 @@ func NewMigrator(repo *Repository) *Migrator {
 
 // Register 注册迁移
 func (m *Migrator) Register(migration *Migration) error {
+	return fmt.Errorf(migratorV1DisabledMessage)
+
+	/*
 	if migration.Version == "" {
 		return fmt.Errorf("migration version cannot be empty")
 	}
@@ -59,10 +64,14 @@ func (m *Migrator) Register(migration *Migration) error {
 
 	m.migrations[migration.Version] = migration
 	return nil
+	*/
 }
 
 // Up 执行所有待执行的迁移
 func (m *Migrator) Up(ctx context.Context) error {
+	return fmt.Errorf(migratorV1DisabledMessage)
+
+	/*
 	// 创建迁移日志表 (如果不存在)
 	if err := m.createMigrationLogTable(ctx); err != nil {
 		return fmt.Errorf("failed to create migration log table: %w", err)
@@ -85,10 +94,14 @@ func (m *Migrator) Up(ctx context.Context) error {
 	}
 
 	return nil
+	*/
 }
 
 // Down 回滚最后一个迁移
 func (m *Migrator) Down(ctx context.Context) error {
+	return fmt.Errorf(migratorV1DisabledMessage)
+
+	/*
 	// 获取最后执行的迁移
 	lastMigration, err := m.getLastExecutedMigration(ctx)
 	if err != nil {
@@ -111,10 +124,14 @@ func (m *Migrator) Down(ctx context.Context) error {
 	}
 
 	return nil
+	*/
 }
 
 // Status 显示迁移状态
 func (m *Migrator) Status(ctx context.Context) ([]map[string]interface{}, error) {
+	return nil, fmt.Errorf(migratorV1DisabledMessage)
+
+	/*
 	executed, err := m.getExecutedMigrations(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get executed migrations: %w", err)
@@ -137,6 +154,7 @@ func (m *Migrator) Status(ctx context.Context) ([]map[string]interface{}, error)
 	}
 
 	return status, nil
+	*/
 }
 
 // runMigration 执行单个迁移
