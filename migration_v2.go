@@ -419,7 +419,7 @@ func applyColumnConstraints(column string, field *Field, dialectName string) str
 		column += " NOT NULL"
 	}
 	if field.Default != nil {
-		column += " DEFAULT " + formatDefaultValueForDialect(field.Default, dialectName)
+		column += " DEFAULT " + formatDefaultValueForDialect(field.Default, dialectName, field.Type)
 	}
 	if field.Primary {
 		column += " PRIMARY KEY"
@@ -430,10 +430,10 @@ func applyColumnConstraints(column string, field *Field, dialectName string) str
 	return column
 }
 
-func formatDefaultValueForDialect(value interface{}, dialectName string) string {
+func formatDefaultValueForDialect(value interface{}, dialectName string, fieldType FieldType) string {
 	switch v := value.(type) {
 	case string:
-		return formatStringDefaultValue(v)
+		return formatStringDefaultValue(v, fieldType)
 	case bool:
 		if strings.EqualFold(dialectName, "sqlserver") {
 			if v {
@@ -450,15 +450,15 @@ func formatDefaultValueForDialect(value interface{}, dialectName string) string 
 	}
 }
 
-func formatStringDefaultValue(raw string) string {
+func formatStringDefaultValue(raw string, fieldType FieldType) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "''"
 	}
-	if isQuotedStringLiteral(trimmed) || isLikelyRawSQLDefaultExpression(trimmed) {
+	if isQuotedStringLiteral(trimmed) || isLikelyRawSQLDefaultExpression(trimmed, fieldType) {
 		return trimmed
 	}
-	return "'" + strings.ReplaceAll(trimmed, "'", "''") + "'"
+	return "'" + strings.ReplaceAll(raw, "'", "''") + "'"
 }
 
 func isQuotedStringLiteral(value string) bool {
@@ -474,7 +474,11 @@ func isQuotedStringLiteral(value string) bool {
 	return false
 }
 
-func isLikelyRawSQLDefaultExpression(value string) bool {
+func isLikelyRawSQLDefaultExpression(value string, fieldType FieldType) bool {
+	if fieldType == TypeString {
+		return false
+	}
+
 	upper := strings.ToUpper(strings.TrimSpace(value))
 	switch upper {
 	case "NULL", "TRUE", "FALSE", "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "LOCALTIME", "LOCALTIMESTAMP":

@@ -168,3 +168,56 @@ go get github.com/eit-cms/eit-db@v1.0.1
 ```
 
 无 API 变更，直接升级即可。
+
+---
+
+# EIT-DB v1.0.2 Release Notes
+
+> 发布日期：2026-03-19  
+> 类型：Patch（Critical Fix）
+
+---
+
+## 概述
+
+v1.0.2 针对 v1.0.1 在 PostgreSQL 下暴露的新语法风险进行修复，并处理网络数据库不可达时测试长时间等待的问题。
+
+---
+
+## Bug 修复
+
+### fix(migration): 修复字符串默认值误判为 SQL 表达式导致的 42601 风险
+
+问题说明：v1.0.1 中默认值格式化逻辑会把带括号的字符串（例如 POINT(1,2)）误判为原生 SQL 表达式，生成未加引号的 DEFAULT 片段，在 PostgreSQL 中可能触发 ERROR: syntax error at or near "," (SQLSTATE 42601)。
+
+修复内容：
+- 默认值格式化新增字段类型维度，字符串字段默认值不再按“函数表达式”规则放行
+- 字符串默认值统一进行 SQL 字面量转义和包裹
+- 保持已有引号字面量向后兼容
+
+### fix(mysql): 为连接 DSN 补充 timeout/readTimeout/writeTimeout
+
+问题说明：MySQL 服务不可达时，测试场景下连接握手可能长时间等待，表现为“测试卡死”。
+
+修复内容：
+- MySQL 默认 DSN 注入 timeout/readTimeout/writeTimeout
+- 自定义 DSN 若未显式声明上述参数，自动补齐
+
+---
+
+## 回归测试
+
+- 新增测试：migration_v2_default_value_test.go
+  - TestBuildCreateTableSQL_StringDefaultWithCommaAndParensIsQuoted
+- 验证通过：
+  - go test -run TestBuildCreateTableSQL_ -count=1 -v ./...
+  - go test -run TestAllAdaptersAvailable -count=1 -timeout=40s -v ./...
+  - go test -count=1 -timeout=90s ./...
+
+---
+
+## 升级方式
+
+go get github.com/eit-cms/eit-db@v1.0.2
+
+无 API 变更，建议所有 v1.0.1 用户直接升级至 v1.0.2。

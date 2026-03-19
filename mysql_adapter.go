@@ -59,20 +59,27 @@ func (a *MySQLAdapter) Connect(ctx context.Context, config *Config) error {
 
 	// 处理空密码
 	password := resolved.Password
+	connectTimeout := 30
+	if config != nil && config.Pool != nil && config.Pool.ConnectTimeout > 0 {
+		connectTimeout = config.Pool.ConnectTimeout
+	}
 
 	// 构建 DSN (Data Source Name)
 	// 格式: [username[:password]@][protocol[(address)]]/dbname[?param1=value1&...&paramN=valueN]
 	var dsn string
 	if strings.TrimSpace(resolved.DSN) != "" {
-		dsn = resolved.DSN
+		dsn = withMySQLTimeoutParams(resolved.DSN, connectTimeout)
 	} else {
 		dsn = fmt.Sprintf(
-			"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
+			"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true&timeout=%ds&readTimeout=%ds&writeTimeout=%ds",
 			resolved.Username,
 			password,
 			resolved.Host,
 			resolved.Port,
 			resolved.Database,
+			connectTimeout,
+			connectTimeout,
+			connectTimeout,
 		)
 	}
 
@@ -174,6 +181,35 @@ func (a *MySQLAdapter) GetRawConn() interface{} {
 // Deprecated: Adapter 层不再暴露 GORM 连接。
 func (a *MySQLAdapter) GetGormDB() *gorm.DB {
 	return nil
+}
+
+func withMySQLTimeoutParams(dsn string, timeoutSeconds int) string {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	params := []string{
+		fmt.Sprintf("timeout=%ds", timeoutSeconds),
+		fmt.Sprintf("readTimeout=%ds", timeoutSeconds),
+		fmt.Sprintf("writeTimeout=%ds", timeoutSeconds),
+	}
+
+	if !strings.Contains(trimmed, "?") {
+		return trimmed + "?" + strings.Join(params, "&")
+	}
+
+	for _, p := range []string{"timeout=", "readTimeout=", "writeTimeout="} {
+		if strings.Contains(trimmed, p) {
+			return trimmed
+		}
+	}
+
+	separator := "&"
+	if strings.HasSuffix(trimmed, "?") || strings.HasSuffix(trimmed, "&") {
+		separator = ""
+	}
+	return trimmed + separator + strings.Join(params, "&")
 }
 
 // RegisterScheduledTask MySQL 适配器暂不支持通过 EVENT 方式实现定时任务

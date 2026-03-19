@@ -110,3 +110,18 @@ func TestBuildCreateTableSQL_PreQuotedStringDefaultCompatible(t *testing.T) {
 		t.Fatalf("expected pre-quoted default to remain compatible, got:\n%s", sql)
 	}
 }
+
+func TestBuildCreateTableSQL_StringDefaultWithCommaAndParensIsQuoted(t *testing.T) {
+	repo := &Repository{adapter: &PostgreSQLAdapter{}}
+	schema := NewBaseSchema("places")
+	schema.AddField(&Field{Name: "label", Type: TypeString, Null: false, Default: "POINT(1,2)"})
+	schema.AddField(&Field{Name: "code", Type: TypeString, Null: false, Default: "a,b"})
+
+	sql := buildCreateTableSQL(repo, schema)
+	if !strings.Contains(sql, `"label" VARCHAR(255) NOT NULL DEFAULT 'POINT(1,2)'`) {
+		t.Fatalf("expected string default with parentheses/comma to be quoted, got:\n%s", sql)
+	}
+	if !strings.Contains(sql, `"code" VARCHAR(255) NOT NULL DEFAULT 'a,b'`) {
+		t.Fatalf("expected string default with comma to be quoted, got:\n%s", sql)
+	}
+}
