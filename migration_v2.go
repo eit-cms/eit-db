@@ -358,7 +358,7 @@ func buildPostgresColumn(field *Field, adapter Adapter) string {
 		return fmt.Sprintf("%s SERIAL PRIMARY KEY", name)
 	}
 	col := fmt.Sprintf("%s %s", name, mapPostgresType(field.Type, adapter))
-	return applyColumnConstraints(col, field)
+	return applyColumnConstraints(col, field, "postgres")
 }
 
 func buildMySQLColumn(field *Field) string {
@@ -367,7 +367,7 @@ func buildMySQLColumn(field *Field) string {
 		return fmt.Sprintf("%s INT AUTO_INCREMENT PRIMARY KEY", name)
 	}
 	col := fmt.Sprintf("%s %s", name, mapMySQLType(field.Type))
-	return applyColumnConstraints(col, field)
+	return applyColumnConstraints(col, field, "mysql")
 }
 
 func buildSQLiteColumn(field *Field) string {
@@ -376,7 +376,7 @@ func buildSQLiteColumn(field *Field) string {
 		return fmt.Sprintf("%s INTEGER PRIMARY KEY AUTOINCREMENT", name)
 	}
 	col := fmt.Sprintf("%s %s", name, mapSQLiteType(field.Type))
-	return applyColumnConstraints(col, field)
+	return applyColumnConstraints(col, field, "sqlite")
 }
 
 func buildSQLServerColumn(field *Field) string {
@@ -385,16 +385,18 @@ func buildSQLServerColumn(field *Field) string {
 		return fmt.Sprintf("%s INT IDENTITY(1,1) PRIMARY KEY", name)
 	}
 	col := fmt.Sprintf("%s %s", name, mapSQLServerType(field.Type))
-	return applyColumnConstraints(col, field)
+	return applyColumnConstraints(col, field, "sqlserver")
 }
 
 func buildGenericColumn(field *Field, dialect SQLDialect) string {
 	name := field.Name
+	dialectName := "generic"
 	if dialect != nil {
 		name = dialect.QuoteIdentifier(field.Name)
+		dialectName = strings.ToLower(strings.TrimSpace(dialect.Name()))
 	}
 	col := fmt.Sprintf("%s %s", name, "TEXT")
-	return applyColumnConstraints(col, field)
+	return applyColumnConstraints(col, field, dialectName)
 }
 
 func quoteColumnIdentifier(dialectName, name string) string {
@@ -412,12 +414,12 @@ func quoteColumnIdentifier(dialectName, name string) string {
 	}
 }
 
-func applyColumnConstraints(column string, field *Field) string {
+func applyColumnConstraints(column string, field *Field, dialectName string) string {
 	if !field.Null {
 		column += " NOT NULL"
 	}
 	if field.Default != nil {
-		column += " DEFAULT " + fmt.Sprint(field.Default)
+		column += " DEFAULT " + formatDefaultValueForDialect(field.Default, dialectName)
 	}
 	if field.Primary {
 		column += " PRIMARY KEY"
@@ -426,6 +428,68 @@ func applyColumnConstraints(column string, field *Field) string {
 		column += " UNIQUE"
 	}
 	return column
+}
+
+func formatDefaultValueForDialect(value interface{}, dialectName string) string {
+	switch v := value.(type) {
+	case string:
+		return formatStringDefaultValue(v)
+	case bool:
+		if strings.EqualFold(dialectName, "sqlserver") {
+			if v {
+				return "1"
+			}
+			return "0"
+		}
+		if v {
+			return "TRUE"
+		}
+		return "FALSE"
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+func formatStringDefaultValue(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "''"
+	}
+	if isQuotedStringLiteral(trimmed) || isLikelyRawSQLDefaultExpression(trimmed) {
+		return trimmed
+	}
+	return "'" + strings.ReplaceAll(trimmed, "'", "''") + "'"
+}
+
+func isQuotedStringLiteral(value string) bool {
+	if len(value) < 2 {
+		return false
+	}
+	if (value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"') {
+		return true
+	}
+	if len(value) >= 3 && (value[0] == 'N' || value[0] == 'n') && value[1] == '\'' && value[len(value)-1] == '\'' {
+		return true
+	}
+	return false
+}
+
+func isLikelyRawSQLDefaultExpression(value string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(value))
+	switch upper {
+	case "NULL", "TRUE", "FALSE", "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "LOCALTIME", "LOCALTIMESTAMP":
+		return true
+	}
+	if strings.Contains(value, "::") {
+		return true
+	}
+	if strings.Contains(value, "(") && strings.HasSuffix(strings.TrimSpace(value), ")") {
+		return true
+	}
+	if strings.HasPrefix(upper, "INTERVAL ") {
+		return true
+	}
+	return false
 }
 
 func mapPostgresType(fieldType FieldType, adapter Adapter) string {
