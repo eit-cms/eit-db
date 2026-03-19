@@ -116,3 +116,55 @@ v1.0.0 稳定后：
 - Neo4j Adapter 事务支持完整化
 - Relationship 支持（已有架构设计草稿）
 - 性能基准测试套件
+
+---
+
+---
+
+# EIT-DB v1.0.1 Release Notes
+
+> 发布日期：2026-03-19  
+> 类型：Patch（Bug Fix）
+
+---
+
+## 概述
+
+v1.0.1 是 v1.0.0 发布后的第一个补丁版本，专项修复 Schema 默认值在方言间的兼容性问题。
+
+---
+
+## Bug 修复
+
+### fix(migration): SQL 默认值方言安全格式化（SQLSTATE 0A000）
+
+**问题**：在 `migration_v2.go` 的 `applyColumnConstraints` 函数中，字符串类型的列默认值（`field.Default`）直接通过 `fmt.Sprint()` 拼接为 SQL，导致裸字符串（如 `active`）在 PostgreSQL DDL 中被解析为列引用（标识符）而非字符串字面量，触发 `SQLSTATE 0A000` 错误。
+
+**修复内容**：
+- 新增 `formatDefaultValueForDialect(value interface{}, dialectName string) string` 分发函数，按方言路由格式化逻辑
+- 新增 `formatStringDefaultValue(raw string) string`：自动为裸字符串添加 `'` 引号，并转义内部单引号；对已有引号的字符串字面量和 SQL 表达式（`CURRENT_TIMESTAMP`、函数调用、`::` 类型转换、`INTERVAL` 等）原样保留
+- SQL Server `BIT` 列的布尔默认值（`true`/`false`）映射为 `1`/`0`
+- **向后兼容**：历史写法 `Default: "'guest'"` 不会被重复包裹
+
+**影响范围**：PostgreSQL / MySQL / SQLite / SQL Server 均已更新，全部通过跨方言单元测试及 PostgreSQL 真实集成测试。
+
+**相关 commit**：`c666c62`
+
+---
+
+## 测试覆盖
+
+| 测试文件 | 类型 | 内容 |
+|---|---|---|
+| `migration_v2_default_value_test.go` | 单元测试 | 4 个跨方言默认值渲染测试 |
+| `adapter-application-tests/postgres_integration_test.go` | 集成测试 | 真实 PostgreSQL 默认值写入验证 |
+
+---
+
+## 升级方式
+
+```bash
+go get github.com/eit-cms/eit-db@v1.0.1
+```
+
+无 API 变更，直接升级即可。
