@@ -82,11 +82,15 @@ func (m *SchemaMigration) DropTable(schema Schema) *SchemaMigration {
 func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
 	// Phase 1: 创建所有表
 	for _, schema := range m.createSchemas {
-		creatSQL := buildCreateTableSQL(repo, schema)
-		if _, err := repo.Exec(ctx, creatSQL); err != nil {
+		if err := executeSchemaCreate(ctx, repo, schema); err != nil {
 			return fmt.Errorf("failed to create table %s: %w", schema.TableName(), err)
 		}
 	}
+
+	if !supportsSQLDDL(repo) {
+		return nil
+	}
+
 	// Phase 2: 创建视图（FK ViewHint 声明的热点查询视图）
 	for _, schema := range m.createSchemas {
 		cs, ok := schema.(constraintSchema)
@@ -111,41 +115,41 @@ func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
 
 // Down 回滚迁移
 func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
+	if supportsSQLDDL(repo) {
 	// Phase 1: 逆序删除视图（视图引用表，必须先删）
-	for i := len(m.createSchemas) - 1; i >= 0; i-- {
-		schema := m.createSchemas[i]
-		cs, ok := schema.(constraintSchema)
-		if !ok {
-			continue
-		}
-		for _, c := range cs.Constraints() {
-			if c.Kind != ConstraintForeignKey || c.ViewHint == nil {
+		for i := len(m.createSchemas) - 1; i >= 0; i-- {
+			schema := m.createSchemas[i]
+			cs, ok := schema.(constraintSchema)
+			if !ok {
 				continue
 			}
-			hint := c.ViewHint
-			viewName := hint.ViewName
-			if viewName == "" {
-				viewName = schema.TableName() + "_" + c.RefTable + "_view"
-			}
-			dropViewSQL := buildDropViewSQL(repo, viewName, hint.Materialized)
-			if _, err := repo.Exec(ctx, dropViewSQL); err != nil {
-				return fmt.Errorf("failed to drop view %s: %w", viewName, err)
+			for _, c := range cs.Constraints() {
+				if c.Kind != ConstraintForeignKey || c.ViewHint == nil {
+					continue
+				}
+				hint := c.ViewHint
+				viewName := hint.ViewName
+				if viewName == "" {
+					viewName = schema.TableName() + "_" + c.RefTable + "_view"
+				}
+				dropViewSQL := buildDropViewSQL(repo, viewName, hint.Materialized)
+				if _, err := repo.Exec(ctx, dropViewSQL); err != nil {
+					return fmt.Errorf("failed to drop view %s: %w", viewName, err)
+				}
 			}
 		}
 	}
 	// Phase 2: 逆序删除表
 	for i := len(m.createSchemas) - 1; i >= 0; i-- {
 		schema := m.createSchemas[i]
-		dropSQL := buildDropTableSQL(repo, schema.TableName())
-		if _, err := repo.Exec(ctx, dropSQL); err != nil {
+		if err := executeSchemaDrop(ctx, repo, schema); err != nil {
 			return fmt.Errorf("failed to drop table %s: %w", schema.TableName(), err)
 		}
 	}
 	// Phase 3: 恢复 Up 中删除的表
 	for _, schema := range m.dropSchemas {
 		tableName := schema.TableName()
-		creatSQL := buildCreateTableSQL(repo, schema)
-		if _, err := repo.Exec(ctx, creatSQL); err != nil {
+		if err := executeSchemaCreate(ctx, repo, schema); err != nil {
 			return fmt.Errorf("failed to recreate table %s: %w", tableName, err)
 		}
 	}
@@ -848,16 +852,34 @@ func (r *MigrationRunner) getLastExecutedVersion(ctx context.Context) (string, e
 
 // recordMigration 记录迁移
 func (r *MigrationRunner) recordMigration(ctx context.Context, version string) error {
-	sql := "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
-	_, err := r.repo.Exec(ctx, sql, version, time.Now())
-	return err
+	return executeMigrationOperation(ctx, r.repo, MigrationOperation{
+		Kind:      MigrationOpRecordApplied,
+		Version:   version,
+		AppliedAt: time.Now(),
+	})
 }
 
 // removeMigrationRecord 删除迁移记录
 func (r *MigrationRunner) removeMigrationRecord(ctx context.Context, version string) error {
-	sql := "DELETE FROM schema_migrations WHERE version = ?"
-	_, err := r.repo.Exec(ctx, sql, version)
-	return err
+	return executeMigrationOperation(ctx, r.repo, MigrationOperation{
+		Kind:    MigrationOpRemoveApplied,
+		Version: version,
+	})
+}
+
+func migrationLogPlaceholder(repo *Repository, index int) string {
+	if index <= 0 {
+		index = 1
+	}
+	dialect := resolveMigrationDialect(repo)
+	if dialect == nil {
+		return "?"
+	}
+	placeholder := strings.TrimSpace(dialect.GetPlaceholder(index))
+	if placeholder == "" {
+		return "?"
+	}
+	return placeholder
 }
 
 // ==================== FK ViewHint 视图 DDL 辅助函数 ====================

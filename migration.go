@@ -156,8 +156,11 @@ func (m *Migrator) runMigration(ctx context.Context, migration *Migration) error
 	}
 
 	// 记录迁移日志
-	query := `INSERT INTO schema_migrations (version, description, executed_at) VALUES (?, ?, ?)`
-	if _, err := tx.Exec(ctx, query, migration.Version, migration.Description, time.Now()); err != nil {
+	if err := executeMigrationOperationWithTx(ctx, m.repo, tx, MigrationOperation{
+		Kind:      MigrationOpRecordApplied,
+		Version:   migration.Version,
+		AppliedAt: time.Now(),
+	}); err != nil {
 		return fmt.Errorf("failed to record migration: %w", err)
 	}
 
@@ -190,8 +193,10 @@ func (m *Migrator) rollbackMigration(ctx context.Context, migration *Migration) 
 	}
 
 	// 删除迁移日志
-	query := `DELETE FROM schema_migrations WHERE version = ?`
-	if _, err := tx.Exec(ctx, query, migration.Version); err != nil {
+	if err := executeMigrationOperationWithTx(ctx, m.repo, tx, MigrationOperation{
+		Kind:    MigrationOpRemoveApplied,
+		Version: migration.Version,
+	}); err != nil {
 		return fmt.Errorf("failed to delete migration log: %w", err)
 	}
 
