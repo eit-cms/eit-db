@@ -1096,6 +1096,7 @@ func NewMigration_20260203160000_AddIndexes() db.MigrationInterface {
 
 - [架构总览](docs/ARCHITECTURE.md) - 当前架构与路线图目标对齐说明
 - [v1.1 路线图](docs/V1_1_ROADMAP.md) - 迁移入口统一与 MongoDB/Neo4j 迁移接入目标
+- [v1.1 迁移工具说明](docs/MIGRATION_TOOL_GUIDE_v1_1.md) - Schema/RawSQL 双入口策略与使用规范
 - [v1.0 升级指南](docs/MIGRATION_GUIDE_v1_0.md) - 从 v0.x 到 v1.0 的迁移步骤与验收清单
 - [v1.0 API 稳定性清单](docs/API_STABILITY_v1_0.md) - Stable/Compat/Internal 承诺边界
 - [能力支持矩阵](docs/CAPABILITY_MATRIX.md) - 数据库/版本/插件/降级路径一览
