@@ -144,11 +144,36 @@ func (c *Config) ResolvedSQLServerConfig() *SQLServerConnectionConfig {
 			resolved.DSN = strings.TrimSpace(dsn)
 		}
 	}
+	if strings.TrimSpace(resolved.ManyToManyStrategy) == "" {
+		if v, _ := c.Options["many_to_many_strategy"].(string); strings.TrimSpace(v) != "" {
+			resolved.ManyToManyStrategy = strings.TrimSpace(v)
+		}
+	}
 	if resolved.Host == "" {
 		resolved.Host = "localhost"
 	}
 	if resolved.Port == 0 {
 		resolved.Port = 1433
+	}
+	if strings.TrimSpace(resolved.ManyToManyStrategy) == "" {
+		resolved.ManyToManyStrategy = "direct_join"
+	}
+	resolved.ManyToManyStrategy = strings.ToLower(strings.TrimSpace(resolved.ManyToManyStrategy))
+	if resolved.RecursiveCTEDepth <= 0 {
+		if v, ok := c.Options["recursive_cte_depth"].(int); ok && v > 0 {
+			resolved.RecursiveCTEDepth = v
+		}
+	}
+	if resolved.RecursiveCTEDepth <= 0 {
+		resolved.RecursiveCTEDepth = 8
+	}
+	if resolved.RecursiveCTEMaxRecursion <= 0 {
+		if v, ok := c.Options["recursive_cte_max_recursion"].(int); ok && v > 0 {
+			resolved.RecursiveCTEMaxRecursion = v
+		}
+	}
+	if resolved.RecursiveCTEMaxRecursion <= 0 {
+		resolved.RecursiveCTEMaxRecursion = 100
 	}
 	return resolved
 }
@@ -169,6 +194,24 @@ func (c *Config) ResolvedMongoConfig() *MongoConnectionConfig {
 	}
 	if resolved.Database == "" {
 		resolved.Database = "eit"
+	}
+	if strings.TrimSpace(resolved.RelationJoinStrategy) == "" {
+		if v, _ := c.Options["relation_join_strategy"].(string); strings.TrimSpace(v) != "" {
+			resolved.RelationJoinStrategy = strings.TrimSpace(v)
+		}
+	}
+	if strings.TrimSpace(resolved.RelationJoinStrategy) == "" {
+		resolved.RelationJoinStrategy = "lookup"
+	}
+	resolved.RelationJoinStrategy = strings.ToLower(strings.TrimSpace(resolved.RelationJoinStrategy))
+	if resolved.HideThroughArtifacts == nil {
+		if v, ok := c.Options["hide_through_artifacts"].(bool); ok {
+			resolved.HideThroughArtifacts = &v
+		}
+	}
+	if resolved.HideThroughArtifacts == nil {
+		defaultHide := true
+		resolved.HideThroughArtifacts = &defaultHide
 	}
 	return resolved
 }
@@ -255,6 +298,13 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 		resolved.Password = preferEnvString(firstNonEmptyEnv("SQLSERVER_PASSWORD"), resolved.Password, "")
 		resolved.Database = preferEnvString(firstNonEmptyEnv("SQLSERVER_DB", "SQLSERVER_DATABASE"), resolved.Database, "master")
 		resolved.DSN = preferEnvString(firstNonEmptyEnv("SQLSERVER_DSN"), resolved.DSN, "")
+		resolved.ManyToManyStrategy = strings.ToLower(strings.TrimSpace(preferEnvString(
+			firstNonEmptyEnv("SQLSERVER_MANY_TO_MANY_STRATEGY"),
+			resolved.ManyToManyStrategy,
+			"direct_join",
+		)))
+		resolved.RecursiveCTEDepth = preferEnvInt(firstNonEmptyEnv("SQLSERVER_RECURSIVE_CTE_DEPTH"), resolved.RecursiveCTEDepth, 8)
+		resolved.RecursiveCTEMaxRecursion = preferEnvInt(firstNonEmptyEnv("SQLSERVER_RECURSIVE_CTE_MAX_RECURSION"), resolved.RecursiveCTEMaxRecursion, 100)
 		config.SQLServer = resolved
 
 	case "sqlite":
@@ -267,6 +317,18 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 		resolved := config.ResolvedMongoConfig()
 		resolved.Database = preferEnvString(firstNonEmptyEnv("MONGODB_DB", "MONGODB_DATABASE"), resolved.Database, "eit")
 		resolved.URI = preferEnvString(firstNonEmptyEnv("MONGODB_URI", "MONGO_URI"), resolved.URI, "")
+		resolved.RelationJoinStrategy = strings.ToLower(strings.TrimSpace(preferEnvString(
+			firstNonEmptyEnv("MONGODB_RELATION_JOIN_STRATEGY"),
+			resolved.RelationJoinStrategy,
+			"lookup",
+		)))
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_HIDE_THROUGH_ARTIFACTS")); v != "" {
+			parsed, err := strconv.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("invalid MONGODB_HIDE_THROUGH_ARTIFACTS value: %q", v)
+			}
+			resolved.HideThroughArtifacts = &parsed
+		}
 		config.MongoDB = resolved
 
 	case "neo4j":
@@ -602,6 +664,15 @@ func (c *Config) Validate() error {
 			hasDSN = strings.TrimSpace(cfg.DSN) != ""
 			host, username, database = cfg.Host, cfg.Username, cfg.Database
 			c.SQLServer = cfg
+			if cfg.ManyToManyStrategy != "direct_join" && cfg.ManyToManyStrategy != "recursive_cte" {
+				return fmt.Errorf("sqlserver: many_to_many_strategy must be direct_join or recursive_cte")
+			}
+			if cfg.RecursiveCTEDepth <= 0 {
+				return fmt.Errorf("sqlserver: recursive_cte_depth must be greater than 0")
+			}
+			if cfg.RecursiveCTEMaxRecursion <= 0 {
+				return fmt.Errorf("sqlserver: recursive_cte_max_recursion must be greater than 0")
+			}
 		}
 		if hasDSN {
 			break
@@ -624,6 +695,9 @@ func (c *Config) Validate() error {
 		}
 		if strings.TrimSpace(mongoCfg.URI) == "" {
 			return fmt.Errorf("mongodb: uri must be specified")
+		}
+		if mongoCfg.RelationJoinStrategy != "lookup" && mongoCfg.RelationJoinStrategy != "pipeline" {
+			return fmt.Errorf("mongodb: relation_join_strategy must be lookup or pipeline")
 		}
 
 	case "neo4j":

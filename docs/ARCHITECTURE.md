@@ -108,6 +108,18 @@ if qf.HasQueryFeature("json_path") {
 
 该结构为未来接入非 SQL 数据源（搜索引擎、图数据库等）预留扩展点。
 
+### 2.5 关系语义层与后端强弱支持
+
+关系语义（HasMany / BelongsTo / HasOne / ManyToMany + Through）在 AST/IR 层统一表达，
+后端按能力实现强/弱支持。
+
+完整矩阵与取舍说明请见 [docs/RELATION_SEMANTICS.md](docs/RELATION_SEMANTICS.md)：
+
+- 后端支持等级（Neo4j / SQL Server / MongoDB / PostgreSQL / MySQL）
+- PostgreSQL / MySQL 当前弱支持原因
+- PostgreSQL + AGE 作为增强路径但不纳入 v1 基线的原因
+- SQL Server / MongoDB 的策略化配置映射
+
 ### 2.4 Migration 与 Schema 变更
 
 - Schema-based 与 Raw SQL 双模式。

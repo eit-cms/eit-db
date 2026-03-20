@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,16 +11,40 @@ import (
 const mongoCompiledQueryPrefix = "MONGO_FIND::"
 const mongoCompiledWritePrefix = "MONGO_WRITE::"
 
+// mongoJoinClause MongoDB 跨集合关联信息（来自 JoinWith）。
+type mongoJoinClause struct {
+	semantic JoinSemantic // 已解析的语义意图
+	schema   Schema       // 目标集合 Schema
+	alias    string       // 输出字段名（as 字段）
+	filters  []Condition  // 对连接目标集合的额外过滤条件
+}
+
 // MongoQueryConstructor MongoDB BSON 查询构造器。
 // 目标是复用统一 QueryConstructor 接口，在 Mongo 下编译为 BSON Find 计划。
 type MongoQueryConstructor struct {
 	schema       Schema
 	selectedCols []string
+	countExpr    *string
 	conditions   []Condition
 	orderBys     []OrderBy
 	limitVal     *int
 	offsetVal    *int
 	writePlan    *MongoCompiledWritePlan
+	customMode   bool
+	joins        []mongoJoinClause // 跨集合关联（通过关系注册表解析为 $lookup）
+}
+
+// MongoLookupStage 描述一个 MongoDB $lookup 聚合阶段的参数。
+// 对于 required 语义（BelongsTo）：调用方应在 $lookup 后追加 $unwind{preserveNullAndEmptyArrays:false}
+// 以过滤掉无匹配文档（等价于 INNER JOIN）。
+// 对于 optional 语义（HasMany/HasOne）：无需额外处理（等价于 LEFT JOIN/OPTIONAL MATCH）。
+type MongoLookupStage struct {
+	From         string       `json:"from"`           // 目标集合名
+	LocalField   string       `json:"localField"`     // 本集合中的连接字段
+	ForeignField string       `json:"foreignField"`   // 目标集合中的连接字段
+	As           string       `json:"as"`             // 输出数组字段名（alias）
+	Semantic     JoinSemantic `json:"semantic"`       // optional → 保留空数组；required → 需过滤
+	ThroughArtifact bool      `json:"throughArtifact,omitempty"` // true 表示中间关系临时字段
 }
 
 // MongoCompiledFindPlan 是 Mongo QueryConstructor 编译后的可执行计划。
@@ -30,6 +55,7 @@ type MongoCompiledFindPlan struct {
 	Sort       []MongoSortField       `json:"sort,omitempty"`
 	Limit      *int                   `json:"limit,omitempty"`
 	Offset     *int                   `json:"offset,omitempty"`
+	Lookups    []MongoLookupStage     `json:"lookups,omitempty"` // $lookup 聚合阶段参数列表
 }
 
 // MongoSortField 表示 Mongo 排序字段。
@@ -55,6 +81,7 @@ type MongoCompiledWritePlan struct {
 func NewMongoQueryConstructor(schema Schema) *MongoQueryConstructor {
 	return &MongoQueryConstructor{
 		schema:       schema,
+		joins:        make([]mongoJoinClause, 0),
 		selectedCols: make([]string, 0),
 		conditions:   make([]Condition, 0),
 		orderBys:     make([]OrderBy, 0),
@@ -66,6 +93,13 @@ func (qb *MongoQueryConstructor) Where(condition Condition) QueryConstructor {
 		qb.conditions = append(qb.conditions, condition)
 	}
 	return qb
+}
+
+func (qb *MongoQueryConstructor) WhereWith(builder *WhereBuilder) QueryConstructor {
+	if builder == nil {
+		return qb
+	}
+	return qb.Where(builder.Build())
 }
 
 func (qb *MongoQueryConstructor) WhereAll(conditions ...Condition) QueryConstructor {
@@ -83,7 +117,48 @@ func (qb *MongoQueryConstructor) WhereAny(conditions ...Condition) QueryConstruc
 }
 
 func (qb *MongoQueryConstructor) Select(fields ...string) QueryConstructor {
+	qb.countExpr = nil
 	qb.selectedCols = append(qb.selectedCols, fields...)
+	return qb
+}
+
+func (qb *MongoQueryConstructor) Count(fieldName ...string) QueryConstructor {
+	expr := "COUNT(*)"
+	if len(fieldName) > 0 && strings.TrimSpace(fieldName[0]) != "" && strings.TrimSpace(fieldName[0]) != "*" {
+		expr = "COUNT(" + strings.TrimSpace(fieldName[0]) + ")"
+	}
+	qb.countExpr = &expr
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
+	return qb
+}
+
+func (qb *MongoQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Count()
+	}
+	field := strings.TrimSpace(builder.field)
+	if field == "" {
+		field = "*"
+	}
+	expr := "COUNT(*)"
+	if field != "*" {
+		if builder.distinct {
+			expr = "COUNT(DISTINCT " + field + ")"
+		} else {
+			expr = "COUNT(" + field + ")"
+		}
+	}
+	if alias := strings.TrimSpace(builder.alias); alias != "" {
+		expr += " AS " + alias
+	}
+	qb.countExpr = &expr
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
 	return qb
 }
 
@@ -128,8 +203,31 @@ func (qb *MongoQueryConstructor) CrossJoin(table string, alias ...string) QueryC
 	return qb.Join(table, "", alias...)
 }
 
+func (qb *MongoQueryConstructor) JoinWith(builder *JoinBuilder) QueryConstructor {
+	if builder == nil || builder.schema == nil {
+		return qb
+	}
+	resolved := resolveJoinSemantic(builder.semantic, qb.schema, builder.schema)
+	alias := strings.TrimSpace(builder.alias)
+	if alias == "" {
+		alias = strings.TrimSpace(builder.schema.TableName())
+	}
+	qb.joins = append(qb.joins, mongoJoinClause{
+		semantic: resolved,
+		schema:   builder.schema,
+		alias:    alias,
+		filters:  append([]Condition(nil), builder.filters...),
+	})
+	return qb
+}
+
 func (qb *MongoQueryConstructor) CrossTableStrategy(strategy CrossTableStrategy) QueryConstructor {
 	// Mongo 不使用 SQL 跨表策略，保留接口兼容。
+	return qb
+}
+
+func (qb *MongoQueryConstructor) CustomMode() QueryConstructor {
+	qb.customMode = true
 	return qb
 }
 
@@ -157,6 +255,10 @@ func (qb *MongoQueryConstructor) Build(ctx context.Context) (string, []interface
 		return mongoCompiledWritePrefix + string(payload), nil, nil
 	}
 
+	if qb.countExpr != nil {
+		return "", nil, fmt.Errorf("mongo query constructor does not support SQL-style Count build; use Mongo aggregation pipeline")
+	}
+
 	plan, err := qb.BuildFindPlan()
 	if err != nil {
 		return "", nil, err
@@ -168,6 +270,14 @@ func (qb *MongoQueryConstructor) Build(ctx context.Context) (string, []interface
 	}
 
 	return mongoCompiledQueryPrefix + string(payload), nil, nil
+}
+
+func (qb *MongoQueryConstructor) SelectCount(ctx context.Context, repo *Repository) (int64, error) {
+	return 0, fmt.Errorf("mongo query constructor does not support SelectCount via SQL-style API")
+}
+
+func (qb *MongoQueryConstructor) Upsert(ctx context.Context, repo *Repository, cs *Changeset, conflictColumns ...string) (sql.Result, error) {
+	return nil, fmt.Errorf("mongo query constructor does not support SQL-style Upsert; use native Mongo write plan")
 }
 
 // InsertOne 设置写入计划为单文档插入。
@@ -283,6 +393,15 @@ func (qb *MongoQueryConstructor) BuildFindPlan() (*MongoCompiledFindPlan, error)
 		projection = append(projection, trimmed)
 	}
 
+	// 解析 $lookup 阶段（来自 JoinWith 的关系注册表）
+	lookups := make([]MongoLookupStage, 0, len(qb.joins))
+	for _, join := range qb.joins {
+		stages := resolveMongoLookups(qb.schema, join)
+		if len(stages) > 0 {
+			lookups = append(lookups, stages...)
+		}
+	}
+
 	return &MongoCompiledFindPlan{
 		Collection: collection,
 		Filter:     filter,
@@ -290,7 +409,149 @@ func (qb *MongoQueryConstructor) BuildFindPlan() (*MongoCompiledFindPlan, error)
 		Sort:       sortFields,
 		Limit:      qb.limitVal,
 		Offset:     qb.offsetVal,
+		Lookups:    lookups,
 	}, nil
+}
+
+// resolveMongoLookups 从关系注册表或 FK 约束推断 $lookup 阶段参数。
+// 推断优先级：① source→join 直接关系声明 → ② join→source 反向关系声明 → ③ FK 约束。
+// 若无法确定关联字段则返回 nil（跳过该连接）。
+func resolveMongoLookups(sourceSchema Schema, join mongoJoinClause) []MongoLookupStage {
+	if join.schema == nil {
+		return nil
+	}
+	targetTable := strings.TrimSpace(join.schema.TableName())
+	if targetTable == "" {
+		return nil
+	}
+	alias := join.alias
+	if alias == "" {
+		alias = targetTable
+	}
+
+	// many-to-many + through：编译为两段 lookup（source -> through -> target）
+	if rel := buildQueryJoinRelationIR(sourceSchema, join.schema); rel != nil &&
+		rel.Type == RelationManyToMany && rel.Through != nil && strings.TrimSpace(rel.Through.Table) != "" {
+		sourcePK := primaryKeyNameOrDefault(sourceSchema)
+		targetPK := primaryKeyNameOrDefault(join.schema)
+		throughAlias := alias + "_through"
+
+		return []MongoLookupStage{
+			{
+				From:         strings.TrimSpace(rel.Through.Table),
+				LocalField:   sourcePK,
+				ForeignField: strings.TrimSpace(rel.Through.SourceKey),
+				As:           throughAlias,
+				Semantic:     JoinSemanticOptional,
+				ThroughArtifact: true,
+			},
+			{
+				From:         targetTable,
+				LocalField:   throughAlias + "." + strings.TrimSpace(rel.Through.TargetKey),
+				ForeignField: targetPK,
+				As:           alias,
+				Semantic:     join.semantic,
+			},
+		}
+	}
+
+	var localField, foreignField string
+
+	// ① source → join 直接声明
+	if rs, ok := sourceSchema.(RelationalSchema); ok {
+		if rel := rs.FindRelation(targetTable); rel != nil && rel.ForeignKey != "" && rel.OriginKey != "" {
+			switch rel.Type {
+			case RelationHasMany, RelationHasOne:
+				// FK 在 target 侧；本侧是 OriginKey（通常是 PK）
+				localField = rel.OriginKey
+				foreignField = rel.ForeignKey
+			case RelationBelongsTo:
+				// FK 在本侧
+				localField = rel.ForeignKey
+				foreignField = rel.OriginKey
+			}
+		}
+	}
+
+	// ② join → source 反向声明
+	if localField == "" {
+		if rj, ok := join.schema.(RelationalSchema); ok {
+			if rel := rj.FindRelation(sourceSchema.TableName()); rel != nil && rel.ForeignKey != "" && rel.OriginKey != "" {
+				switch rel.Type {
+				case RelationBelongsTo:
+					// join 持有 FK 指向 source；source 是 OriginKey，join 是 ForeignKey
+					localField = rel.OriginKey
+					foreignField = rel.ForeignKey
+				case RelationHasMany, RelationHasOne:
+					// source 持有 FK 指向 join（不常见但合法）
+					localField = rel.ForeignKey
+					foreignField = rel.OriginKey
+				}
+			}
+		}
+	}
+
+	// ③ FK 约束回退
+	if localField == "" {
+		localField, foreignField = resolveMongoFieldsFromFK(sourceSchema, join.schema)
+	}
+
+	if localField == "" || foreignField == "" {
+		return nil // 无法确定关联字段，跳过
+	}
+
+	return []MongoLookupStage{{
+		From:         targetTable,
+		LocalField:   localField,
+		ForeignField: foreignField,
+		As:           alias,
+		Semantic:     join.semantic,
+	}}
+}
+
+func primaryKeyNameOrDefault(schema Schema) string {
+	if schema != nil {
+		if pk := schema.PrimaryKeyField(); pk != nil {
+			name := strings.TrimSpace(pk.Name)
+			if name != "" {
+				return name
+			}
+		}
+	}
+	return "id"
+}
+
+// resolveMongoFieldsFromFK 从 FK 约束推断 localField / foreignField（兜底方案）。
+func resolveMongoFieldsFromFK(sourceSchema, joinSchema Schema) (localField, foreignField string) {
+	// join Schema 持有 FK 指向 source（HasMany 场景）
+	if cs, ok := joinSchema.(ConstrainedSchema); ok {
+		for _, tc := range cs.Constraints() {
+			if tc.Kind != ConstraintForeignKey {
+				continue
+			}
+			if !strings.EqualFold(tc.RefTable, sourceSchema.TableName()) {
+				continue
+			}
+			if len(tc.Fields) > 0 && len(tc.RefFields) > 0 {
+				return tc.RefFields[0], tc.Fields[0] // local=source PK, foreign=join FK
+			}
+		}
+	}
+	// source Schema 持有 FK 指向 join（BelongsTo 场景）
+	if cs, ok := sourceSchema.(ConstrainedSchema); ok {
+		for _, tc := range cs.Constraints() {
+			if tc.Kind != ConstraintForeignKey {
+				continue
+			}
+			if !strings.EqualFold(tc.RefTable, joinSchema.TableName()) {
+				continue
+			}
+			if len(tc.Fields) > 0 && len(tc.RefFields) > 0 {
+				return tc.Fields[0], tc.RefFields[0] // local=source FK, foreign=join PK
+			}
+		}
+	}
+	return "", ""
 }
 
 func (qb *MongoQueryConstructor) GetNativeBuilder() interface{} {

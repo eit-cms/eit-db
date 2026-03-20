@@ -175,12 +175,17 @@ type SQLServerConnectionConfig struct {
 	Password string `json:"password,omitempty" yaml:"password,omitempty"`
 	Database string `json:"database,omitempty" yaml:"database,omitempty"`
 	DSN      string `json:"dsn,omitempty" yaml:"dsn,omitempty"`
+	ManyToManyStrategy string `json:"many_to_many_strategy,omitempty" yaml:"many_to_many_strategy,omitempty"` // "direct_join" | "recursive_cte"
+	RecursiveCTEDepth   int    `json:"recursive_cte_depth,omitempty" yaml:"recursive_cte_depth,omitempty"`         // 默认 8
+	RecursiveCTEMaxRecursion int `json:"recursive_cte_max_recursion,omitempty" yaml:"recursive_cte_max_recursion,omitempty"` // 默认 100
 }
 
 // MongoConnectionConfig MongoDB 连接配置。
 type MongoConnectionConfig struct {
-	URI      string `json:"uri,omitempty" yaml:"uri,omitempty"`
-	Database string `json:"database,omitempty" yaml:"database,omitempty"`
+	URI                  string `json:"uri,omitempty" yaml:"uri,omitempty"`
+	Database             string `json:"database,omitempty" yaml:"database,omitempty"`
+	RelationJoinStrategy string `json:"relation_join_strategy,omitempty" yaml:"relation_join_strategy,omitempty"` // "lookup" | "pipeline"
+	HideThroughArtifacts *bool  `json:"hide_through_artifacts,omitempty" yaml:"hide_through_artifacts,omitempty"` // 默认 true
 }
 
 // Neo4jConnectionConfig Neo4j 连接配置。

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"reflect"
 	"strings"
 	"time"
@@ -57,6 +58,10 @@ type TableConstraint struct {
 	RefFields []string // 被引用列名（顺序与 Fields 对应）
 	OnDelete  string   // "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | ""
 	OnUpdate  string   // "CASCADE" | "SET NULL" | "RESTRICT" | "NO ACTION" | ""
+	// Neo4jRelType 可选：在 Neo4j 中对应的关系类型（如 "FOLLOWS"、"OWNS"）。
+	// 仅当 Kind == ConstraintForeignKey 时有效。
+	// 空时由 Neo4j 编译器根据约束名推断（去除 "fk_"/"rel_" 等常见前缀后转大写）。
+	Neo4jRelType string
 	// 可选：外键热点查询视图声明（仅当 Kind == ConstraintForeignKey 时有意义）
 	ViewHint *ViewHint
 }
@@ -122,12 +127,183 @@ type Schema interface {
 	PrimaryKeyField() *Field
 }
 
+// ConstrainedSchema 扩展 Schema，允许访问表级约束（外键、唯一约束等）。
+// BaseSchema 实现此接口；外部自定义 Schema 实现可选择性实现。
+type ConstrainedSchema interface {
+	Schema
+	Constraints() []TableConstraint
+}
+
+// ─── 关系注册表 ───────────────────────────────────────────────────────────────
+
+// Schema 关系类型常量（ORM 风格，用于 SchemaRelation 关系注册表）。
+// 使用与 relationship.go 中相同的 RelationType 类型，添加 HasMany/HasOne/BelongsTo 语义。
+const (
+	// RelationHasMany 一对多：本 Schema 是"一"侧，目标 Schema 持有外键（FK 在目标侧）。
+	// 连接时默认 optional（本实体可能有 0 个目标实体）。
+	RelationHasMany RelationType = "has_many"
+
+	// RelationHasOne 一对一：本 Schema 是"一"侧，目标 Schema 持有外键（FK 在目标侧）。
+	// 连接时默认 optional（本实体可能没有对应目标实体）。
+	RelationHasOne RelationType = "has_one"
+
+	// RelationBelongsTo 多对一：本 Schema 持有外键（FK 在本侧），目标 Schema 是"一"侧。
+	// 连接时默认 required（本实体必须有对应父实体）。
+	RelationBelongsTo RelationType = "belongs_to"
+
+	// RelationManyToMany 多对多：通常需要 Through 中间关系（中间表/中间边）。
+	// 连接时默认 optional。
+	RelationManyToMany RelationType = ManyToMany
+)
+
+// RelationThrough 声明多对多关系的中间关系信息。
+//
+// SQL 可将 Table 视为中间表（可做递归 CTE / join 表优化）；
+// Neo4j 可将其映射为边关系类型或中间节点；
+// Mongo 可将其用于两段 $lookup 管道。
+type RelationThrough struct {
+	Schema    Schema // 中间关系 Schema（优先）
+	Table     string // 中间关系表/集合名（Schema 为空时兜底）
+	SourceKey string // source -> through 的连接键
+	TargetKey string // through -> target 的连接键
+}
+
+// SchemaRelation 声明两个 Schema 之间的关系。
+//
+// 字段语义：
+//   - HasMany / HasOne：FK 在目标 Schema 侧；ForeignKey 是目标侧字段，OriginKey 是本侧字段（通常是 PK）。
+//   - BelongsTo：FK 在本 Schema 侧；ForeignKey 是本侧字段，OriginKey 是目标侧字段（通常是 PK）。
+//
+// 适配器行为：
+//   - SQL：自然使用 FK 约束；关系声明补充语义推断。
+//   - Neo4j：ForeignKey/OriginKey 是逻辑字段，关系以边（edge）存储；不物化为节点属性。
+//   - MongoDB：适配器根据 ForeignKey/OriginKey 生成 $lookup 管道；字段是否物化由适配器自决。
+type SchemaRelation struct {
+	Type         RelationType
+	TargetSchema Schema
+	Name         string // 关系名称（适配器可据此映射关系类型/边类型）
+	ForeignKey   string // 持有 FK 的一侧字段名
+	OriginKey    string // 被引用的一侧字段名（通常是 PK）
+	Through      *RelationThrough
+	Reversible   bool  // 一对一可逆标记（或显式声明允许反向路径优化）
+	optional     *bool  // nil = 按 RelationType 默认；true/false 显式覆盖
+}
+
+// Semantic 根据关系类型和显式覆盖推断 JoinSemantic。
+func (r *SchemaRelation) Semantic() JoinSemantic {
+	if r.optional != nil {
+		if *r.optional {
+			return JoinSemanticOptional
+		}
+		return JoinSemanticRequired
+	}
+	if r.Type == RelationBelongsTo {
+		return JoinSemanticRequired
+	}
+	return JoinSemanticOptional
+}
+
+// SemanticFromSource 从"源"的视角推断语义：
+// 当 source 连接到 join Schema，而 join Schema 声明了指向 source 的关系时使用。
+// 规则：join BelongsTo source → source 视角为 optional（source 可能有 0 个 join）
+//       join HasMany/HasOne source → source 视角为 required（source 是 join 的父实体，join 必有 FK）
+func (r *SchemaRelation) SemanticFromSource() JoinSemantic {
+	if r.optional != nil {
+		if *r.optional {
+			return JoinSemanticOptional
+		}
+		return JoinSemanticRequired
+	}
+	switch r.Type {
+	case RelationBelongsTo:
+		return JoinSemanticOptional
+	case RelationManyToMany:
+		return JoinSemanticOptional
+	default:
+		return JoinSemanticRequired
+	}
+}
+
+// SchemaRelationBuilder 关系声明的流式构造器，通过 HasMany/HasOne/BelongsTo 创建。
+type SchemaRelationBuilder struct {
+	rel *SchemaRelation
+}
+
+// Over 声明关联字段。
+// foreignKey 是持有 FK 的一侧字段名；originKey 是被引用的一侧字段名（通常是 PK）。
+// HasMany/HasOne：foreignKey 在目标侧，originKey 在本侧。
+// BelongsTo：foreignKey 在本侧，originKey 在目标侧。
+func (b *SchemaRelationBuilder) Over(foreignKey, originKey string) *SchemaRelationBuilder {
+	b.rel.ForeignKey = strings.TrimSpace(foreignKey)
+	b.rel.OriginKey = strings.TrimSpace(originKey)
+	return b
+}
+
+// Through 声明多对多关系使用的中间关系（中间表/集合/边）。
+// sourceKey 表示 source -> through 的连接键，targetKey 表示 through -> target 的连接键。
+func (b *SchemaRelationBuilder) Through(through Schema, sourceKey, targetKey string) *SchemaRelationBuilder {
+	name := ""
+	if through != nil {
+		name = strings.TrimSpace(through.TableName())
+	}
+	b.rel.Through = &RelationThrough{
+		Schema:    through,
+		Table:     name,
+		SourceKey: strings.TrimSpace(sourceKey),
+		TargetKey: strings.TrimSpace(targetKey),
+	}
+	return b
+}
+
+// Named 为关系声明一个语义名称。
+// 适配器可将其映射为底层关系类型（例如 Neo4j 边类型）。
+func (b *SchemaRelationBuilder) Named(name string) *SchemaRelationBuilder {
+	b.rel.Name = strings.TrimSpace(name)
+	return b
+}
+
+// Reversible 标记该关系允许反向路径优化（典型用于一对一）。
+func (b *SchemaRelationBuilder) Reversible(enabled bool) *SchemaRelationBuilder {
+	b.rel.Reversible = enabled
+	return b
+}
+
+// Optional 显式覆盖为 optional 语义（不论关系类型默认值）。
+func (b *SchemaRelationBuilder) Optional() *SchemaRelationBuilder {
+	t := true
+	b.rel.optional = &t
+	return b
+}
+
+// Required 显式覆盖为 required 语义（不论关系类型默认值）。
+func (b *SchemaRelationBuilder) Required() *SchemaRelationBuilder {
+	f := false
+	b.rel.optional = &f
+	return b
+}
+
+// Relation 返回构建好的 SchemaRelation（主要用于测试断言）。
+func (b *SchemaRelationBuilder) Relation() *SchemaRelation {
+	return b.rel
+}
+
+// RelationalSchema 扩展 Schema，支持显式关系注册（HasMany / HasOne / BelongsTo）。
+// BaseSchema 实现此接口；关系注册优先于 FK 约束用于连接语义推断和跨集合关联。
+type RelationalSchema interface {
+	Schema
+	Relations() []SchemaRelation
+	FindRelation(targetTable string) *SchemaRelation
+}
+
+// ─── BaseSchema ───────────────────────────────────────────────────────────────
+
 // BaseSchema 基础模式实现
 type BaseSchema struct {
 	tableName   string
 	fields      map[string]*Field
 	fieldList   []*Field
 	constraints []TableConstraint
+	relations   []SchemaRelation // 关系注册表
 }
 
 // NewBaseSchema 创建基础模式
@@ -137,6 +313,7 @@ func NewBaseSchema(tableName string) *BaseSchema {
 		fields:      make(map[string]*Field),
 		fieldList:   make([]*Field, 0),
 		constraints: make([]TableConstraint, 0),
+		relations:   make([]SchemaRelation, 0),
 	}
 }
 
@@ -212,6 +389,61 @@ func (s *BaseSchema) PrimaryKeyField() *Field {
 // Constraints 返回所有表级约束
 func (s *BaseSchema) Constraints() []TableConstraint {
 	return append([]TableConstraint(nil), s.constraints...)
+}
+
+// ─── 关系注册表方法 ────────────────────────────────────────────────────────────
+
+// HasMany 声明本 Schema 是"一"侧，目标 Schema 持有外键（一对多）。
+// 连接语义默认 optional（本实体可能有 0 个目标实体）。
+// 流式调用 .Over(foreignKey, originKey) 可声明关联字段；.Required()/.Optional() 可覆盖默认语义。
+//
+//	userSchema.HasMany(orderSchema).Over("user_id", "id")
+func (s *BaseSchema) HasMany(target Schema) *SchemaRelationBuilder {
+	s.relations = append(s.relations, SchemaRelation{Type: RelationHasMany, TargetSchema: target})
+	return &SchemaRelationBuilder{rel: &s.relations[len(s.relations)-1]}
+}
+
+// HasOne 声明本 Schema 是"一"侧，目标 Schema 持有外键（一对一）。
+// 连接语义默认 optional（本实体可能没有对应目标实体）。
+//
+//	userSchema.HasOne(profileSchema).Over("user_id", "id")
+func (s *BaseSchema) HasOne(target Schema) *SchemaRelationBuilder {
+	s.relations = append(s.relations, SchemaRelation{Type: RelationHasOne, TargetSchema: target})
+	return &SchemaRelationBuilder{rel: &s.relations[len(s.relations)-1]}
+}
+
+// BelongsTo 声明本 Schema 持有外键，归属于目标 Schema（多对一）。
+// 连接语义默认 required（本实体必须有对应父实体）。
+//
+//	orderSchema.BelongsTo(userSchema).Over("user_id", "id")
+func (s *BaseSchema) BelongsTo(target Schema) *SchemaRelationBuilder {
+	s.relations = append(s.relations, SchemaRelation{Type: RelationBelongsTo, TargetSchema: target})
+	return &SchemaRelationBuilder{rel: &s.relations[len(s.relations)-1]}
+}
+
+// ManyToMany 声明多对多关系。
+// 推荐配合 Through 指定中间关系（中间表/集合/边），便于各适配器做深度优化。
+//
+//	userSchema.ManyToMany(roleSchema).Through(userRoleSchema, "user_id", "role_id")
+func (s *BaseSchema) ManyToMany(target Schema) *SchemaRelationBuilder {
+	s.relations = append(s.relations, SchemaRelation{Type: RelationManyToMany, TargetSchema: target})
+	return &SchemaRelationBuilder{rel: &s.relations[len(s.relations)-1]}
+}
+
+// Relations 返回本 Schema 上所有已声明的关系。
+func (s *BaseSchema) Relations() []SchemaRelation {
+	return append([]SchemaRelation(nil), s.relations...)
+}
+
+// FindRelation 查找本 Schema 与目标表名之间的第一个关系声明；未找到时返回 nil。
+func (s *BaseSchema) FindRelation(targetTable string) *SchemaRelation {
+	for i := range s.relations {
+		if s.relations[i].TargetSchema != nil &&
+			strings.EqualFold(s.relations[i].TargetSchema.TableName(), targetTable) {
+			return &s.relations[i]
+		}
+	}
+	return nil
 }
 
 // AddPrimaryKey 添加表级主键约束（支持复合主键）
@@ -596,6 +828,7 @@ func Timestamp() time.Time {
 type QueryConstructor interface {
 	// 条件查询
 	Where(condition Condition) QueryConstructor
+	WhereWith(builder *WhereBuilder) QueryConstructor
 
 	// 多条件 AND 组合
 	WhereAll(conditions ...Condition) QueryConstructor
@@ -605,6 +838,8 @@ type QueryConstructor interface {
 
 	// 字段选择
 	Select(fields ...string) QueryConstructor
+	Count(fieldName ...string) QueryConstructor
+	CountWith(builder *CountBuilder) QueryConstructor
 
 	// 排序
 	OrderBy(field string, direction string) QueryConstructor // direction: "ASC" | "DESC"
@@ -613,18 +848,31 @@ type QueryConstructor interface {
 	Limit(count int) QueryConstructor
 	Offset(count int) QueryConstructor
 
-	// 跨表查询（JOIN）
+	// 跨表查询（raw string JOIN）
 	FromAlias(alias string) QueryConstructor
 	Join(table, onClause string, alias ...string) QueryConstructor
 	LeftJoin(table, onClause string, alias ...string) QueryConstructor
 	RightJoin(table, onClause string, alias ...string) QueryConstructor
 	CrossJoin(table string, alias ...string) QueryConstructor
 
+	// JoinWith 使用 JoinBuilder 进行 Schema 感知的跨表连接。
+	// SQL 后端：从 Schema.TableName() 取表名；Filter 条件追加到 WHERE。
+	// Neo4j 后端：从 Schema FK 约束推断关系类型（On 为空时自动推断）；
+	//             Filter 条件转换为对连接节点的属性过滤。
+	JoinWith(builder *JoinBuilder) QueryConstructor
+
 	// 跨表查询策略（方言级默认 + 显式覆盖）
 	CrossTableStrategy(strategy CrossTableStrategy) QueryConstructor
+	CustomMode() QueryConstructor
 
 	// 构建查询
 	Build(ctx context.Context) (string, []interface{}, error)
+
+	// 统计结果数量（忽略当前分页设置）
+	SelectCount(ctx context.Context, repo *Repository) (int64, error)
+
+	// UPSERT（支持方言原生语法；不支持时事务模拟）
+	Upsert(ctx context.Context, repo *Repository, cs *Changeset, conflictColumns ...string) (sql.Result, error)
 
 	// 获取底层查询构造器（用于 Adapter 特定优化）
 	GetNativeBuilder() interface{}
@@ -709,11 +957,317 @@ func (c *NotCondition) Translate(translator ConditionTranslator) (string, []inte
 
 // ==================== Condition Builder (Fluent API) ====================
 
-// ConditionBuilder 条件构造器 - 流式 API
-type ConditionBuilder struct {
+// WhereBuilder 条件构造器（独立于 QueryConstructor）。
+// 可先构造完整条件树，再一次性注入 Where 子句。
+type WhereBuilder struct {
+	condition Condition
+}
+
+// NewWhereBuilder 创建独立 WhereBuilder。
+func NewWhereBuilder(condition Condition) *WhereBuilder {
+	return &WhereBuilder{condition: condition}
+}
+
+// Build 返回构造后的根条件。
+func (b *WhereBuilder) Build() Condition {
+	if b == nil {
+		return nil
+	}
+	return b.condition
+}
+
+// And 追加 AND 条件。
+func (b *WhereBuilder) And(condition Condition) *WhereBuilder {
+	if condition == nil {
+		return b
+	}
+	if b == nil {
+		return NewWhereBuilder(condition)
+	}
+	if b.condition == nil {
+		b.condition = condition
+		return b
+	}
+	b.condition = And(b.condition, condition)
+	return b
+}
+
+// Or 追加 OR 条件。
+func (b *WhereBuilder) Or(condition Condition) *WhereBuilder {
+	if condition == nil {
+		return b
+	}
+	if b == nil {
+		return NewWhereBuilder(condition)
+	}
+	if b.condition == nil {
+		b.condition = condition
+		return b
+	}
+	b.condition = Or(b.condition, condition)
+	return b
+}
+
+// Not 将当前条件取反。
+func (b *WhereBuilder) Not() *WhereBuilder {
+	if b == nil || b.condition == nil {
+		return b
+	}
+	b.condition = Not(b.condition)
+	return b
+}
+
+// ==================== Join Semantic ====================
+
+// JoinSemantic 表达 JOIN 的语义意图，与 SQL 方言和数据库类型无关。
+// 适配器根据此语义自行选择最优实现（JOIN 关键词、关系模式、MATCH 类型等）。
+type JoinSemantic string
+
+const (
+	// JoinSemanticRequired 必须匹配：双方都必须存在（SQL: INNER JOIN；Neo4j: MATCH）。
+	JoinSemanticRequired JoinSemantic = "required"
+	// JoinSemanticOptional 连接目标可不存在（SQL: LEFT JOIN；Neo4j: OPTIONAL MATCH）。
+	JoinSemanticOptional JoinSemantic = "optional"
+	// JoinSemanticCross 笛卡尔积（SQL: CROSS JOIN；Neo4j: 独立 MATCH）。
+	JoinSemanticCross JoinSemantic = "cross"
+	// JoinSemanticInfer 由 Schema FK 关系自动推断（默认值）：
+	// FK 字段 Null:true → JoinSemanticOptional；否则 → JoinSemanticRequired。
+	JoinSemanticInfer JoinSemantic = ""
+)
+
+// ==================== Join Builder ====================
+
+// JoinBuilder 连接构造器，携带目标 Schema，支持跨数据库通用表达。
+//
+// 以语义意图（JoinSemantic）驱动，无需关心 SQL JOIN 方向细节：
+//   - SQL 后端：semantic → INNER/LEFT/CROSS JOIN；On() 字符串作为 ON 子句；
+//     Filter() 以 join alias 限定后追加到 WHERE。
+//   - Neo4j 后端：semantic → MATCH / OPTIONAL MATCH；On() 为空时从 Schema FK
+//     推断关系类型；Filter() 转换为节点属性过滤。
+type JoinBuilder struct {
+	semantic JoinSemantic // 语义意图；JoinSemanticInfer 时由适配器从 Schema 推断
+	schema   Schema       // 目标实体 Schema（必填）
+	alias    string       // 可选别名
+	onClause string       // SQL: ON 表达式；Neo4j: 关系模式字符串（可选，为空时推断）
+	filters  []Condition  // 对连接目标实体的额外过滤条件
+}
+
+// NewJoinWith 创建 Schema 感知 JoinBuilder，语义由 Schema FK 关系自动推断。
+// FK 字段 Null:true → 自动使用 optional（LEFT JOIN / OPTIONAL MATCH）；否则 → required。
+// 可通过 .Required() / .Optional() 显式覆盖。
+func NewJoinWith(schema Schema) *JoinBuilder {
+	return &JoinBuilder{semantic: JoinSemanticInfer, schema: schema}
+}
+
+// NewRequiredJoin 创建语义为"必须匹配"的 JoinBuilder（SQL: INNER JOIN；Neo4j: MATCH）。
+func NewRequiredJoin(schema Schema) *JoinBuilder {
+	return &JoinBuilder{semantic: JoinSemanticRequired, schema: schema}
+}
+
+// NewOptionalJoin 创建语义为"可选匹配"的 JoinBuilder（SQL: LEFT JOIN；Neo4j: OPTIONAL MATCH）。
+func NewOptionalJoin(schema Schema) *JoinBuilder {
+	return &JoinBuilder{semantic: JoinSemanticOptional, schema: schema}
+}
+
+// NewJoinBuilder 创建 JoinBuilder（兼容旧代码；推荐改用 NewJoinWith / NewRequiredJoin / NewOptionalJoin）。
+func NewJoinBuilder(joinType string, schema Schema) *JoinBuilder {
+	switch strings.ToUpper(strings.TrimSpace(joinType)) {
+	case "LEFT", "RIGHT": // RIGHT 统一视为 optional，跨 DB 均安全
+		return NewOptionalJoin(schema)
+	case "CROSS":
+		return &JoinBuilder{semantic: JoinSemanticCross, schema: schema}
+	default: // INNER, ""
+		return NewRequiredJoin(schema)
+	}
+}
+
+// NewInnerJoin 创建 INNER JOIN builder（等同于 NewRequiredJoin）。
+func NewInnerJoin(schema Schema) *JoinBuilder { return NewRequiredJoin(schema) }
+
+// NewLeftJoin 创建 LEFT JOIN builder（等同于 NewOptionalJoin）。
+func NewLeftJoin(schema Schema) *JoinBuilder { return NewOptionalJoin(schema) }
+
+// NewRightJoin 创建 RIGHT JOIN builder。
+// 注意：RIGHT JOIN 在 NoSQL 适配器中无方向概念，统一视为 optional 语义，跨数据库均安全。
+func NewRightJoin(schema Schema) *JoinBuilder { return NewOptionalJoin(schema) }
+
+// NewCrossJoin 创建 CROSS JOIN builder（无 ON 条件）。
+func NewCrossJoin(schema Schema) *JoinBuilder {
+	return &JoinBuilder{semantic: JoinSemanticCross, schema: schema}
+}
+
+// Required 显式设置语义为"必须匹配"，覆盖自动推断。
+func (b *JoinBuilder) Required() *JoinBuilder {
+	if b != nil {
+		b.semantic = JoinSemanticRequired
+	}
+	return b
+}
+
+// Optional 显式设置语义为"可选匹配"，覆盖自动推断。
+func (b *JoinBuilder) Optional() *JoinBuilder {
+	if b != nil {
+		b.semantic = JoinSemanticOptional
+	}
+	return b
+}
+
+// As 设置连接别名。
+func (b *JoinBuilder) As(alias string) *JoinBuilder {
+	if b != nil {
+		b.alias = strings.TrimSpace(alias)
+	}
+	return b
+}
+
+// On 设置连接表达式。
+// SQL: 直接作为 ON <expr>，例如 "users.id = orders.user_id"。
+// Neo4j: 关系模式字符串，例如 "->[:OWNS]->" 或 "<-[:BELONGS_TO]-"。
+// 为空时 Neo4j 编译器自动从目标 Schema 的 FK 约束推断关系类型。
+func (b *JoinBuilder) On(expr string) *JoinBuilder {
+	if b != nil {
+		b.onClause = strings.TrimSpace(expr)
+	}
+	return b
+}
+
+// Filter 追加对连接目标实体的过滤条件。
+// SQL: 以 join alias 限定后追加到 WHERE 子句。
+// Neo4j: 转换为对连接节点的属性过滤（WHERE alias.prop op val）。
+func (b *JoinBuilder) Filter(conds ...Condition) *JoinBuilder {
+	if b != nil {
+		b.filters = append(b.filters, conds...)
+	}
+	return b
+}
+
+// resolveJoinSemantic 将 JoinSemanticInfer 解析为具体语义。
+// 优先级：① 关系注册表（HasMany/HasOne/BelongsTo 声明）→ ② FK 约束 → ③ 默认 required。
+func resolveJoinSemantic(semantic JoinSemantic, sourceSchema, joinSchema Schema) JoinSemantic {
+	if semantic != JoinSemanticInfer {
+		return semantic
+	}
+
+	// ① 关系注册表（优先）
+	if s, ok := findSemanticFromRelations(sourceSchema, joinSchema); ok {
+		return s
+	}
+
+	// ② FK 约束（向后兼容）
+	// joinSchema 持有 FK 指向 sourceSchema，且 FK 字段可空
+	// → source 可能没有对应 join 行 → optional
+	if joinSchema != nil && sourceSchema != nil {
+		if cs, ok := joinSchema.(ConstrainedSchema); ok {
+			for _, tc := range cs.Constraints() {
+				if tc.Kind != ConstraintForeignKey {
+					continue
+				}
+				if !strings.EqualFold(tc.RefTable, sourceSchema.TableName()) {
+					continue
+				}
+				for _, fkField := range tc.Fields {
+					if f := joinSchema.GetField(fkField); f != nil && f.Null {
+						return JoinSemanticOptional
+					}
+				}
+			}
+		}
+	}
+	// sourceSchema 持有 FK 指向 joinSchema，且 FK 字段可空
+	// → source 不一定有对应 join 目标 → optional
+	if sourceSchema != nil && joinSchema != nil {
+		if cs, ok := sourceSchema.(ConstrainedSchema); ok {
+			for _, tc := range cs.Constraints() {
+				if tc.Kind != ConstraintForeignKey {
+					continue
+				}
+				if !strings.EqualFold(tc.RefTable, joinSchema.TableName()) {
+					continue
+				}
+				for _, fkField := range tc.Fields {
+					if f := sourceSchema.GetField(fkField); f != nil && f.Null {
+						return JoinSemanticOptional
+					}
+				}
+			}
+		}
+	}
+	return JoinSemanticRequired
+}
+
+// findSemanticFromRelations 从关系注册表推断连接语义。
+// 先查 source→join 直接声明，再查 join→source 反向声明。
+func findSemanticFromRelations(sourceSchema, joinSchema Schema) (JoinSemantic, bool) {
+	if sourceSchema == nil || joinSchema == nil {
+		return JoinSemanticRequired, false
+	}
+	joinTable := joinSchema.TableName()
+	sourceTable := sourceSchema.TableName()
+
+	// source 持有直接声明的关系（source→join）
+	if rs, ok := sourceSchema.(RelationalSchema); ok {
+		if rel := rs.FindRelation(joinTable); rel != nil {
+			return rel.Semantic(), true
+		}
+	}
+
+	// join 持有指向 source 的反向声明（join→source）：翻转从 source 视角的语义
+	if rj, ok := joinSchema.(RelationalSchema); ok {
+		if rel := rj.FindRelation(sourceTable); rel != nil {
+			return rel.SemanticFromSource(), true
+		}
+	}
+
+	return JoinSemanticRequired, false
+}
+
+// semanticToSQLJoinType 将语义映射为 SQL JOIN 关键词（INNER / LEFT / CROSS）。
+func semanticToSQLJoinType(s JoinSemantic) string {
+	switch s {
+	case JoinSemanticOptional:
+		return "LEFT"
+	case JoinSemanticCross:
+		return "CROSS"
+	default: // required
+		return "INNER"
+	}
+}
+
+// CountBuilder 统计投影构造器。
+// 用于表达 COUNT(field) / COUNT(DISTINCT field) 及别名。
+type CountBuilder struct {
 	field    string
-	operator string
-	value    interface{}
+	distinct bool
+	alias    string
+}
+
+// NewCountBuilder 创建 CountBuilder。
+// 为空或传入 "*" 时表示 COUNT(*)。
+func NewCountBuilder(fieldName ...string) *CountBuilder {
+	field := "*"
+	if len(fieldName) > 0 {
+		trimmed := strings.TrimSpace(fieldName[0])
+		if trimmed != "" {
+			field = trimmed
+		}
+	}
+	return &CountBuilder{field: field}
+}
+
+// As 为 COUNT 投影设置别名。
+func (b *CountBuilder) As(alias string) *CountBuilder {
+	if b != nil {
+		b.alias = strings.TrimSpace(alias)
+	}
+	return b
+}
+
+// Distinct 切换为 COUNT(DISTINCT field)。
+func (b *CountBuilder) Distinct() *CountBuilder {
+	if b != nil {
+		b.distinct = true
+	}
+	return b
 }
 
 // Eq 等于条件

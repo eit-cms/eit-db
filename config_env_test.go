@@ -55,6 +55,9 @@ func TestLoadConfigFromEnvWithDefaults_SQLServerDetailed(t *testing.T) {
 	t.Setenv("SQLSERVER_USER", "sa")
 	t.Setenv("SQLSERVER_PASSWORD", "StrongPass!1")
 	t.Setenv("SQLSERVER_DATABASE", "sample")
+	t.Setenv("SQLSERVER_MANY_TO_MANY_STRATEGY", "recursive_cte")
+	t.Setenv("SQLSERVER_RECURSIVE_CTE_DEPTH", "12")
+	t.Setenv("SQLSERVER_RECURSIVE_CTE_MAX_RECURSION", "200")
 
 	cfg, err := LoadConfigFromEnv("sqlserver")
 	if err != nil {
@@ -64,11 +67,19 @@ func TestLoadConfigFromEnvWithDefaults_SQLServerDetailed(t *testing.T) {
 	if resolved.Host != "sql.local" || resolved.Port != 11433 || resolved.Database != "sample" {
 		t.Fatalf("unexpected sqlserver config: %+v", cfg)
 	}
+	if resolved.ManyToManyStrategy != "recursive_cte" {
+		t.Fatalf("expected many_to_many_strategy recursive_cte, got: %s", resolved.ManyToManyStrategy)
+	}
+	if resolved.RecursiveCTEDepth != 12 || resolved.RecursiveCTEMaxRecursion != 200 {
+		t.Fatalf("expected recursive cte settings depth=12 max=200, got depth=%d max=%d", resolved.RecursiveCTEDepth, resolved.RecursiveCTEMaxRecursion)
+	}
 }
 
 func TestLoadConfigFromEnvWithDefaults_Mongo(t *testing.T) {
 	t.Setenv("MONGODB_URI", "mongodb://localhost:27018")
 	t.Setenv("MONGODB_DATABASE", "sample")
+	t.Setenv("MONGODB_RELATION_JOIN_STRATEGY", "pipeline")
+	t.Setenv("MONGODB_HIDE_THROUGH_ARTIFACTS", "false")
 
 	cfg, err := LoadConfigFromEnv("mongodb")
 	if err != nil {
@@ -80,6 +91,44 @@ func TestLoadConfigFromEnvWithDefaults_Mongo(t *testing.T) {
 	}
 	if resolved.URI != "mongodb://localhost:27018" {
 		t.Fatalf("expected mongodb uri to be loaded, got %q", resolved.URI)
+	}
+	if resolved.RelationJoinStrategy != "pipeline" {
+		t.Fatalf("expected relation join strategy pipeline, got %q", resolved.RelationJoinStrategy)
+	}
+	if resolved.HideThroughArtifacts == nil || *resolved.HideThroughArtifacts {
+		t.Fatalf("expected hide_through_artifacts=false from env, got %+v", resolved.HideThroughArtifacts)
+	}
+}
+
+func TestValidateMongoRejectsInvalidRelationJoinStrategy(t *testing.T) {
+	cfg := &Config{
+		Adapter: "mongodb",
+		MongoDB: &MongoConnectionConfig{
+			URI:                  "mongodb://localhost:27017",
+			Database:             "eit",
+			RelationJoinStrategy: "invalid",
+		},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for invalid mongodb relation_join_strategy")
+	}
+}
+
+func TestValidateSQLServerRejectsInvalidManyToManyStrategy(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlserver",
+		SQLServer: &SQLServerConnectionConfig{
+			Host:               "localhost",
+			Port:               1433,
+			Username:           "sa",
+			Database:           "master",
+			ManyToManyStrategy: "invalid",
+		},
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for invalid sqlserver many_to_many_strategy")
 	}
 }
 

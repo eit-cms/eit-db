@@ -293,7 +293,19 @@ func (t *SQLServerTx) QueryRow(ctx context.Context, query string, args ...interf
 
 // GetQueryBuilderProvider 返回查询构造器提供者
 func (a *SQLServerAdapter) GetQueryBuilderProvider() QueryConstructorProvider {
-	return NewDefaultSQLQueryConstructorProvider(NewSQLServerDialect())
+	strategy := "direct_join"
+	if a != nil && a.config != nil {
+		resolved := a.config.ResolvedSQLServerConfig()
+		if strings.TrimSpace(resolved.ManyToManyStrategy) != "" {
+			strategy = resolved.ManyToManyStrategy
+		}
+		return NewDefaultSQLQueryConstructorProvider(NewSQLServerDialectWithOptions(
+			strategy,
+			resolved.RecursiveCTEDepth,
+			resolved.RecursiveCTEMaxRecursion,
+		))
+	}
+	return NewDefaultSQLQueryConstructorProvider(NewSQLServerDialectWithManyToManyStrategy(strategy))
 }
 
 // GetDatabaseFeatures 返回 SQL Server 数据库特性

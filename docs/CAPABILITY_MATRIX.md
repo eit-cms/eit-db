@@ -83,6 +83,12 @@ SQLite JSON 降级说明：
 
 说明：括号中的内容表示 QueryFallbackStrategy。
 
+## 3.1 关系语义支持矩阵（JoinSemantic / Relation Registry）
+
+该矩阵与说明统一维护在 [docs/RELATION_SEMANTICS.md](docs/RELATION_SEMANTICS.md)。
+
+这里保留索引，不再重复正文，避免 README / ARCHITECTURE / CAPABILITY_MATRIX 多处内容漂移。
+
 ## 4. 全文搜索与分词能力（运行时探测）
 
 | 数据库 | 运行时探测 | 分词能力模式 | 插件/服务依赖 | 默认降级路径 |

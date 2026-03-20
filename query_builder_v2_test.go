@@ -480,6 +480,111 @@ func TestSQLQueryConstructorBuildIR(t *testing.T) {
 	}
 }
 
+func TestSQLQueryConstructorBuildIRRelationMeta(t *testing.T) {
+	userSchema := NewBaseSchema("users")
+	userSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	roleSchema := NewBaseSchema("roles")
+	roleSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	userRoleSchema := NewBaseSchema("user_roles")
+
+	userSchema.ManyToMany(roleSchema).
+		Through(userRoleSchema, "user_id", "role_id").
+		Named("grants_role").
+		Reversible(true)
+
+	qc := NewSQLQueryConstructor(userSchema, NewMySQLDialect())
+	qc.JoinWith(NewJoinWith(roleSchema).As("r"))
+
+	ir, err := qc.BuildIR(context.Background())
+	if err != nil {
+		t.Fatalf("BuildIR failed: %v", err)
+	}
+	if len(ir.Joins) != 1 {
+		t.Fatalf("expected 1 join, got %d", len(ir.Joins))
+	}
+	if ir.Joins[0].Relation == nil {
+		t.Fatalf("expected relation metadata in join IR")
+	}
+	rel := ir.Joins[0].Relation
+	if rel.Type != RelationManyToMany {
+		t.Fatalf("expected many_to_many relation type, got: %s", rel.Type)
+	}
+	if rel.Name != "grants_role" {
+		t.Fatalf("expected relation name grants_role, got: %s", rel.Name)
+	}
+	if rel.Direction != "forward" {
+		t.Fatalf("expected relation direction forward, got: %s", rel.Direction)
+	}
+	if !rel.Reversible {
+		t.Fatalf("expected reversible relation metadata")
+	}
+	if rel.Through == nil {
+		t.Fatalf("expected through metadata")
+	}
+	if rel.Through.Table != "user_roles" {
+		t.Fatalf("expected through table user_roles, got: %s", rel.Through.Table)
+	}
+	if rel.Through.SourceKey != "user_id" || rel.Through.TargetKey != "role_id" {
+		t.Fatalf("unexpected through keys: source=%s target=%s", rel.Through.SourceKey, rel.Through.TargetKey)
+	}
+}
+
+func TestSQLQueryConstructorManyToManyThroughCompilesTwoJoins(t *testing.T) {
+	userSchema := NewBaseSchema("users")
+	userSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	roleSchema := NewBaseSchema("roles")
+	roleSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	userRoleSchema := NewBaseSchema("user_roles")
+
+	userSchema.ManyToMany(roleSchema).Through(userRoleSchema, "user_id", "role_id")
+
+	qc := NewSQLQueryConstructor(userSchema, NewSQLServerDialect())
+	qc.FromAlias("u").JoinWith(NewJoinWith(roleSchema).As("r"))
+
+	sql, _, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	upper := strings.ToUpper(sql)
+	if strings.Count(upper, " JOIN ") < 2 {
+		t.Fatalf("expected at least 2 JOIN clauses for many_to_many through, got: %s", sql)
+	}
+	if !strings.Contains(upper, "[USER_ROLES]") {
+		t.Fatalf("expected through table user_roles in SQL, got: %s", sql)
+	}
+	if !strings.Contains(upper, "[U].[ID] = ") || !strings.Contains(upper, " = [R].[ID]") {
+		t.Fatalf("expected through join key conditions in SQL, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorManyToManyThroughRecursiveCteStrategy(t *testing.T) {
+	userSchema := NewBaseSchema("users")
+	userSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	roleSchema := NewBaseSchema("roles")
+	roleSchema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	userRoleSchema := NewBaseSchema("user_roles")
+
+	userSchema.ManyToMany(roleSchema).Through(userRoleSchema, "user_id", "role_id")
+
+	qc := NewSQLQueryConstructor(userSchema, NewSQLServerDialectWithOptions("recursive_cte", 12, 250))
+	qc.FromAlias("u").JoinWith(NewJoinWith(roleSchema).As("r"))
+
+	sql, _, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	upper := strings.ToUpper(sql)
+	if !strings.HasPrefix(upper, "WITH [M2M_RECURSIVE] AS") {
+		t.Fatalf("expected recursive CTE prefix in SQL, got: %s", sql)
+	}
+	if !strings.Contains(upper, "UNION ALL") || !strings.Contains(upper, "OPTION (MAXRECURSION 250)") {
+		t.Fatalf("expected recursive union and maxrecursion hint, got: %s", sql)
+	}
+	if !strings.Contains(upper, "WHERE R.[DEPTH] < 12") {
+		t.Fatalf("expected recursive depth limit from dialect options, got: %s", sql)
+	}
+}
+
 // TestSQLQueryConstructorLimitOffset 测试 LIMIT 和 OFFSET
 func TestSQLQueryConstructorLimitOffset(t *testing.T) {
 	schema := NewBaseSchema("users")

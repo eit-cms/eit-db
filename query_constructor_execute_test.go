@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -331,6 +333,9 @@ type staticQueryConstructor struct {
 }
 
 func (s *staticQueryConstructor) Where(condition Condition) QueryConstructor { return s }
+func (s *staticQueryConstructor) WhereWith(builder *WhereBuilder) QueryConstructor {
+	return s
+}
 func (s *staticQueryConstructor) WhereAll(conditions ...Condition) QueryConstructor {
 	return s
 }
@@ -338,6 +343,10 @@ func (s *staticQueryConstructor) WhereAny(conditions ...Condition) QueryConstruc
 	return s
 }
 func (s *staticQueryConstructor) Select(fields ...string) QueryConstructor { return s }
+func (s *staticQueryConstructor) Count(fieldName ...string) QueryConstructor { return s }
+func (s *staticQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor {
+	return s
+}
 func (s *staticQueryConstructor) OrderBy(field string, direction string) QueryConstructor {
 	return s
 }
@@ -361,7 +370,15 @@ func (s *staticQueryConstructor) CrossJoin(table string, alias ...string) QueryC
 func (s *staticQueryConstructor) CrossTableStrategy(strategy CrossTableStrategy) QueryConstructor {
 	return s
 }
+func (s *staticQueryConstructor) JoinWith(builder *JoinBuilder) QueryConstructor { return s }
+func (s *staticQueryConstructor) CustomMode() QueryConstructor { return s }
 func (s *staticQueryConstructor) Build(ctx context.Context) (string, []interface{}, error) {
 	return s.query, copyQueryArgs(s.args), nil
+}
+func (s *staticQueryConstructor) SelectCount(ctx context.Context, repo *Repository) (int64, error) {
+	return 0, fmt.Errorf("static query constructor does not implement SelectCount")
+}
+func (s *staticQueryConstructor) Upsert(ctx context.Context, repo *Repository, cs *Changeset, conflictColumns ...string) (sql.Result, error) {
+	return nil, fmt.Errorf("static query constructor does not implement Upsert")
 }
 func (s *staticQueryConstructor) GetNativeBuilder() interface{} { return s }

@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -46,6 +48,7 @@ type SQLQueryConstructor struct {
 	dialect            SQLDialect
 	compiler           QueryCompiler
 	selectedCols       []string
+	countExpr          *string
 	conditions         []Condition
 	orderBys           []OrderBy
 	limitVal           *int
@@ -53,15 +56,20 @@ type SQLQueryConstructor struct {
 	fromAlias          string
 	joins              []sqlJoinClause
 	crossTableStrategy CrossTableStrategy
+	customQueryMode    bool
+	buildErr           error
 	// viewRegistry 指定查询跨表视图注册表；nil 时使用 GlobalCrossTableViewRegistry。
 	viewRegistry *CrossTableViewRegistry
 }
 
 type sqlJoinClause struct {
 	joinType string
+	semantic JoinSemantic // JoinWith: 已解析的语义意图
 	table    string
 	alias    string
 	onClause string
+	schema   Schema       // JoinWith: 目标实体 Schema（Schema 感知 JOIN，用于 IR 元数据）
+	filters  []Condition  // JoinWith: 对连接目标实体的额外过滤条件
 }
 
 func (qb *SQLQueryConstructor) baseTableName() string {
@@ -81,6 +89,81 @@ func (qb *SQLQueryConstructor) baseTableName() string {
 func (qb *SQLQueryConstructor) shouldUseASForAlias() bool {
 	name := strings.ToLower(strings.TrimSpace(qb.dialect.Name()))
 	return name == "postgres" || name == "postgresql" || name == "sqlserver"
+}
+
+func (qb *SQLQueryConstructor) setBuildErr(err error) {
+	if err != nil && qb.buildErr == nil {
+		qb.buildErr = err
+	}
+}
+
+func (qb *SQLQueryConstructor) isKnownSchemaField(name string) bool {
+	if qb.schema == nil {
+		return false
+	}
+	return qb.schema.GetField(name) != nil
+}
+
+func (qb *SQLQueryConstructor) validateFieldReference(name string, allowStar bool) error {
+	if qb.customQueryMode {
+		return nil
+	}
+	if qb.schema == nil || len(qb.schema.Fields()) == 0 {
+		// 兼容历史使用：部分调用只传表名，不显式注册字段定义。
+		return nil
+	}
+
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("field name cannot be empty")
+	}
+	if allowStar && trimmed == "*" {
+		return nil
+	}
+	if strings.ContainsAny(trimmed, " ()\t\n") {
+		return fmt.Errorf("field %q looks like expression; call CustomMode() to allow custom query expressions", name)
+	}
+
+	base := trimmed
+	if strings.Contains(base, ".") {
+		parts := strings.Split(base, ".")
+		base = strings.TrimSpace(parts[len(parts)-1])
+	}
+	base = strings.Trim(base, "`\"[]")
+	if base == "" {
+		return fmt.Errorf("field %q is invalid", name)
+	}
+
+	if !qb.isKnownSchemaField(base) {
+		if len(qb.joins) > 0 {
+			// JOIN 场景下允许关联表字段（例如视图路由后的字段）。
+			return nil
+		}
+		return fmt.Errorf("field %q does not exist in schema %q", base, qb.schema.TableName())
+	}
+	return nil
+}
+
+func (qb *SQLQueryConstructor) validateConditionFields(condition Condition) error {
+	if qb.customQueryMode || condition == nil {
+		return nil
+	}
+
+	switch c := condition.(type) {
+	case *SimpleCondition:
+		return qb.validateFieldReference(c.Field, false)
+	case *CompositeCondition:
+		for _, inner := range c.Conditions {
+			if err := qb.validateConditionFields(inner); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *NotCondition:
+		return qb.validateConditionFields(c.Condition)
+	default:
+		return nil
+	}
 }
 
 func (qb *SQLQueryConstructor) joinKeywordWithAlias(alias string) string {
@@ -407,12 +490,36 @@ func NewSQLiteDialect() *SQLiteDialect {
 
 // SQL Server 方言
 type SQLServerDialect struct {
-	nextParamIndex int
+	nextParamIndex     int
+	manyToManyStrategy string
+	recursiveCTEDepth int
+	maxRecursion      int
 }
 
 func NewSQLServerDialect() *SQLServerDialect {
+	return NewSQLServerDialectWithManyToManyStrategy("direct_join")
+}
+
+func NewSQLServerDialectWithManyToManyStrategy(strategy string) *SQLServerDialect {
+	return NewSQLServerDialectWithOptions(strategy, 8, 100)
+}
+
+func NewSQLServerDialectWithOptions(strategy string, recursiveCTEDepth int, maxRecursion int) *SQLServerDialect {
+	v := strings.ToLower(strings.TrimSpace(strategy))
+	if v != "recursive_cte" {
+		v = "direct_join"
+	}
+	if recursiveCTEDepth <= 0 {
+		recursiveCTEDepth = 8
+	}
+	if maxRecursion <= 0 {
+		maxRecursion = 100
+	}
 	return &SQLServerDialect{
-		nextParamIndex: 1,
+		nextParamIndex:     1,
+		manyToManyStrategy: v,
+		recursiveCTEDepth: recursiveCTEDepth,
+		maxRecursion:      maxRecursion,
 	}
 }
 
@@ -467,6 +574,28 @@ func (d *SQLServerDialect) TranslateCondition(condition Condition, argIndex *int
 	return translator.TranslateCondition(condition)
 }
 
+func (d *SQLServerDialect) SQLManyToManyStrategy() string {
+	v := strings.ToLower(strings.TrimSpace(d.manyToManyStrategy))
+	if v == "recursive_cte" {
+		return v
+	}
+	return "direct_join"
+}
+
+func (d *SQLServerDialect) SQLRecursiveCTEDepth() int {
+	if d.recursiveCTEDepth <= 0 {
+		return 8
+	}
+	return d.recursiveCTEDepth
+}
+
+func (d *SQLServerDialect) SQLRecursiveCTEMaxRecursion() int {
+	if d.maxRecursion <= 0 {
+		return 100
+	}
+	return d.maxRecursion
+}
+
 // ==================== SQLQueryBuilder 实现 ====================
 
 // NewSQLQueryConstructor 创建新的 SQL 查询构造器
@@ -517,6 +646,11 @@ func (qb *SQLQueryConstructor) CrossTableStrategy(strategy CrossTableStrategy) Q
 	return qb
 }
 
+func (qb *SQLQueryConstructor) CustomMode() QueryConstructor {
+	qb.customQueryMode = true
+	return qb
+}
+
 // Join 添加 INNER JOIN。
 // 若 alias 为空，则在 PostgreSQL/SQL Server 下会自动生成别名并采用 AS 语法。
 func (qb *SQLQueryConstructor) Join(table, onClause string, alias ...string) QueryConstructor {
@@ -538,12 +672,79 @@ func (qb *SQLQueryConstructor) CrossJoin(table string, alias ...string) QueryCon
 	return qb.addJoin("CROSS", table, "", alias...)
 }
 
+// JoinWith 使用 JoinBuilder 进行 Schema 感知的跨表连接。
+// 表名从 builder.schema.TableName() 取得；Filter() 条件以 join alias（或表名）限定后追加到 WHERE。
+func (qb *SQLQueryConstructor) JoinWith(builder *JoinBuilder) QueryConstructor {
+	if builder == nil || builder.schema == nil {
+		return qb
+	}
+	table := strings.TrimSpace(builder.schema.TableName())
+	if table == "" {
+		return qb
+	}
+	alias := strings.TrimSpace(builder.alias)
+
+	resolved := resolveJoinSemantic(builder.semantic, qb.schema, builder.schema)
+	qb.joins = append(qb.joins, sqlJoinClause{
+		joinType: semanticToSQLJoinType(resolved),
+		semantic: resolved,
+		table:    table,
+		alias:    alias,
+		onClause: strings.TrimSpace(builder.onClause),
+		schema:   builder.schema,
+		filters:  append([]Condition(nil), builder.filters...),
+	})
+
+	// filter 条件以 join alias（回退到表名）限定后追加到全局 WHERE。
+	filterPrefix := alias
+	if filterPrefix == "" {
+		filterPrefix = table
+	}
+	for _, f := range builder.filters {
+		qb.conditions = append(qb.conditions, qb.qualifyConditionWithPrefix(f, filterPrefix))
+	}
+	return qb
+}
+
+// qualifyConditionWithPrefix 使用指定前缀（而非主表前缀）限定条件字段。
+func (qb *SQLQueryConstructor) qualifyConditionWithPrefix(condition Condition, prefix string) Condition {
+	switch c := condition.(type) {
+	case *SimpleCondition:
+		copied := *c
+		field := strings.TrimSpace(c.Field)
+		if !strings.Contains(field, ".") && prefix != "" {
+			copied.Field = prefix + "." + field
+		}
+		return &copied
+	case *CompositeCondition:
+		copied := *c
+		copied.Conditions = make([]Condition, len(c.Conditions))
+		for i, inner := range c.Conditions {
+			copied.Conditions[i] = qb.qualifyConditionWithPrefix(inner, prefix)
+		}
+		return &copied
+	case *NotCondition:
+		copied := *c
+		copied.Condition = qb.qualifyConditionWithPrefix(c.Condition, prefix)
+		return &copied
+	default:
+		return condition
+	}
+}
+
 // Where 添加单个条件
 func (qb *SQLQueryConstructor) Where(condition Condition) QueryConstructor {
 	if condition != nil {
 		qb.conditions = append(qb.conditions, qb.qualifyCondition(condition))
 	}
 	return qb
+}
+
+func (qb *SQLQueryConstructor) WhereWith(builder *WhereBuilder) QueryConstructor {
+	if builder == nil {
+		return qb
+	}
+	return qb.Where(builder.Build())
 }
 
 // WhereAll 添加多个 AND 条件
@@ -572,7 +773,56 @@ func (qb *SQLQueryConstructor) WhereAny(conditions ...Condition) QueryConstructo
 
 // Select 选择字段
 func (qb *SQLQueryConstructor) Select(fields ...string) QueryConstructor {
+	qb.countExpr = nil
 	qb.selectedCols = append(qb.selectedCols, fields...)
+	return qb
+}
+
+func (qb *SQLQueryConstructor) Count(fieldName ...string) QueryConstructor {
+	expr := "COUNT(*)"
+	if len(fieldName) > 0 && strings.TrimSpace(fieldName[0]) != "" && strings.TrimSpace(fieldName[0]) != "*" {
+		expr = "COUNT(" + qb.dialect.QuoteIdentifier(qb.qualifyIdentifier(fieldName[0])) + ")"
+	}
+	qb.countExpr = &expr
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
+	return qb
+}
+
+func (qb *SQLQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Count()
+	}
+
+	field := strings.TrimSpace(builder.field)
+	if field == "" {
+		field = "*"
+	}
+	if field != "*" {
+		qb.setBuildErr(qb.validateFieldReference(field, false))
+	}
+
+	base := "COUNT(*)"
+	if field != "*" {
+		qualified := qb.dialect.QuoteIdentifier(qb.qualifyIdentifier(field))
+		if builder.distinct {
+			base = "COUNT(DISTINCT " + qualified + ")"
+		} else {
+			base = "COUNT(" + qualified + ")"
+		}
+	}
+
+	if alias := strings.TrimSpace(builder.alias); alias != "" {
+		base += " AS " + qb.dialect.QuoteIdentifier(alias)
+	}
+
+	qb.countExpr = &base
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
 	return qb
 }
 
@@ -603,6 +853,9 @@ func (qb *SQLQueryConstructor) Offset(count int) QueryConstructor {
 
 // Build 构建 SQL 查询
 func (qb *SQLQueryConstructor) Build(ctx context.Context) (string, []interface{}, error) {
+	if qb.buildErr != nil {
+		return "", nil, qb.buildErr
+	}
 	ir, err := qb.BuildIR(ctx)
 	if err != nil {
 		return "", nil, err
@@ -619,15 +872,401 @@ func (qb *SQLQueryConstructor) Build(ctx context.Context) (string, []interface{}
 	return compiler.Compile(ctx, ir)
 }
 
+// SelectCount 统计匹配记录数，忽略当前构造器上的分页设置。
+func (qb *SQLQueryConstructor) SelectCount(ctx context.Context, repo *Repository) (int64, error) {
+	if repo == nil {
+		return 0, fmt.Errorf("repository is nil")
+	}
+	if qb.buildErr != nil {
+		return 0, qb.buildErr
+	}
+
+	ir, err := qb.BuildIR(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	countExpr := "COUNT(*)"
+	if qb.countExpr != nil {
+		countExpr = *qb.countExpr
+	}
+	ir.Projections = []string{countExpr}
+	ir.OrderBys = nil
+	ir.Limit = nil
+	ir.Offset = nil
+
+	compiler := qb.compiler
+	if compiler == nil {
+		compiler = NewBaseSQLCompiler(qb.dialect)
+	}
+	if c, ok := compiler.(DialectAwareQueryCompiler); ok {
+		c.SetDialect(qb.dialect)
+	}
+
+	query, args, err := compiler.Compile(ctx, ir)
+	if err != nil {
+		return 0, err
+	}
+
+	row := repo.QueryRow(ctx, query, args...)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// Upsert 基于 Changeset 执行 upsert。
+// 支持方言原生 upsert；不支持时回退到事务模拟（先 UPDATE，后 INSERT）。
+func (qb *SQLQueryConstructor) Upsert(ctx context.Context, repo *Repository, cs *Changeset, conflictColumns ...string) (sql.Result, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repository is nil")
+	}
+	if cs == nil {
+		return nil, fmt.Errorf("changeset is nil")
+	}
+	if !cs.IsValid() {
+		return nil, fmt.Errorf("changeset validation failed: %v", cs.Errors())
+	}
+
+	cs.ForceChanges()
+	changes := cs.Changes()
+	if len(changes) == 0 {
+		return nil, fmt.Errorf("no fields to upsert")
+	}
+
+	normalizedConflict := normalizeConflictColumns(conflictColumns)
+	if len(normalizedConflict) == 0 {
+		normalizedConflict = inferConflictColumnsFromSchema(qb.schema)
+	}
+	if len(normalizedConflict) == 0 {
+		return nil, fmt.Errorf("upsert requires conflict columns")
+	}
+
+	keys := sortedMapKeys(changes)
+	dialectName := strings.ToLower(strings.TrimSpace(qb.dialect.Name()))
+	supportsNativeUpsert := false
+	if features := repo.GetAdapter().GetQueryFeatures(); features != nil {
+		supportsNativeUpsert = features.SupportsUpsert
+	}
+
+	if supportsNativeUpsert {
+		query, args, err := qb.buildNativeUpsertSQL(dialectName, keys, changes, normalizedConflict)
+		if err != nil {
+			return nil, err
+		}
+		return repo.Exec(ctx, query, args...)
+	}
+
+	return qb.upsertWithTransactionFallback(ctx, repo, keys, changes, normalizedConflict)
+}
+
+func (qb *SQLQueryConstructor) buildNativeUpsertSQL(dialectName string, keys []string, changes map[string]interface{}, conflictColumns []string) (string, []interface{}, error) {
+	quotedTable := qb.dialect.QuoteIdentifier(qb.schema.TableName())
+	insertCols := make([]string, 0, len(keys))
+	placeholders := make([]string, 0, len(keys))
+	args := make([]interface{}, 0, len(keys))
+
+	argIndex := 1
+	for _, key := range keys {
+		insertCols = append(insertCols, qb.dialect.QuoteIdentifier(key))
+		placeholders = append(placeholders, qb.dialect.GetPlaceholder(argIndex))
+		args = append(args, changes[key])
+		argIndex++
+	}
+
+	nonConflict := nonConflictColumns(keys, conflictColumns)
+	nonConflict = excludePrimaryColumns(qb.schema, nonConflict)
+	if len(nonConflict) == 0 {
+		nonConflict = []string{conflictColumns[0]}
+	}
+
+	switch dialectName {
+	case "postgres", "postgresql", "sqlite":
+		sets := make([]string, 0, len(nonConflict))
+		for _, col := range nonConflict {
+			quotedCol := qb.dialect.QuoteIdentifier(col)
+			if containsString(conflictColumns, col) {
+				sets = append(sets, fmt.Sprintf("%s = %s", quotedCol, quotedCol))
+			} else {
+				sets = append(sets, fmt.Sprintf("%s = excluded.%s", quotedCol, quotedCol))
+			}
+		}
+		conflictCols := make([]string, 0, len(conflictColumns))
+		for _, col := range conflictColumns {
+			conflictCols = append(conflictCols, qb.dialect.QuoteIdentifier(col))
+		}
+		query := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+			quotedTable,
+			strings.Join(insertCols, ", "),
+			strings.Join(placeholders, ", "),
+			strings.Join(conflictCols, ", "),
+			strings.Join(sets, ", "),
+		)
+		return query, args, nil
+
+	case "mysql":
+		sets := make([]string, 0, len(nonConflict))
+		for _, col := range nonConflict {
+			quotedCol := qb.dialect.QuoteIdentifier(col)
+			if containsString(conflictColumns, col) {
+				sets = append(sets, fmt.Sprintf("%s = %s", quotedCol, quotedCol))
+			} else {
+				sets = append(sets, fmt.Sprintf("%s = VALUES(%s)", quotedCol, quotedCol))
+			}
+		}
+		query := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES (%s) ON DUPLICATE KEY UPDATE %s",
+			quotedTable,
+			strings.Join(insertCols, ", "),
+			strings.Join(placeholders, ", "),
+			strings.Join(sets, ", "),
+		)
+		return query, args, nil
+
+	case "sqlserver":
+		srcCols := make([]string, 0, len(keys))
+		for _, col := range keys {
+			srcCols = append(srcCols, qb.dialect.QuoteIdentifier(col))
+		}
+		onClauses := make([]string, 0, len(conflictColumns))
+		for _, col := range conflictColumns {
+			quotedCol := qb.dialect.QuoteIdentifier(col)
+			onClauses = append(onClauses, fmt.Sprintf("t.%s = s.%s", quotedCol, quotedCol))
+		}
+		sets := make([]string, 0, len(nonConflict))
+		for _, col := range nonConflict {
+			quotedCol := qb.dialect.QuoteIdentifier(col)
+			if containsString(conflictColumns, col) {
+				sets = append(sets, fmt.Sprintf("t.%s = t.%s", quotedCol, quotedCol))
+			} else {
+				sets = append(sets, fmt.Sprintf("t.%s = s.%s", quotedCol, quotedCol))
+			}
+		}
+		query := fmt.Sprintf(
+			"MERGE INTO %s AS t USING (VALUES (%s)) AS s (%s) ON %s WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT (%s) VALUES (%s);",
+			quotedTable,
+			strings.Join(placeholders, ", "),
+			strings.Join(srcCols, ", "),
+			strings.Join(onClauses, " AND "),
+			strings.Join(sets, ", "),
+			strings.Join(insertCols, ", "),
+			buildSQLServerSourceProjection(keys, qb.dialect),
+		)
+		return query, args, nil
+
+	default:
+		return "", nil, fmt.Errorf("native upsert is not implemented for dialect %q", dialectName)
+	}
+}
+
+func (qb *SQLQueryConstructor) upsertWithTransactionFallback(ctx context.Context, repo *Repository, keys []string, changes map[string]interface{}, conflictColumns []string) (sql.Result, error) {
+	tx, err := repo.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	quotedTable := qb.dialect.QuoteIdentifier(qb.schema.TableName())
+	nonConflict := nonConflictColumns(keys, conflictColumns)
+	nonConflict = excludePrimaryColumns(qb.schema, nonConflict)
+	if len(nonConflict) == 0 {
+		nonConflict = []string{conflictColumns[0]}
+	}
+
+	setClauses := make([]string, 0, len(nonConflict))
+	updateArgs := make([]interface{}, 0, len(nonConflict)+len(conflictColumns))
+	argIndex := 1
+	for _, col := range nonConflict {
+		quotedCol := qb.dialect.QuoteIdentifier(col)
+		setClauses = append(setClauses, fmt.Sprintf("%s = %s", quotedCol, qb.dialect.GetPlaceholder(argIndex)))
+		updateArgs = append(updateArgs, changes[col])
+		argIndex++
+	}
+
+	whereClauses := make([]string, 0, len(conflictColumns))
+	for _, col := range conflictColumns {
+		quotedCol := qb.dialect.QuoteIdentifier(col)
+		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", quotedCol, qb.dialect.GetPlaceholder(argIndex)))
+		updateArgs = append(updateArgs, changes[col])
+		argIndex++
+	}
+
+	updateSQL := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE %s",
+		quotedTable,
+		strings.Join(setClauses, ", "),
+		strings.Join(whereClauses, " AND "),
+	)
+
+	updateRes, err := tx.Exec(ctx, updateSQL, updateArgs...)
+	if err != nil {
+		return nil, err
+	}
+	if rows, _ := updateRes.RowsAffected(); rows > 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return updateRes, nil
+	}
+
+	insertCols := make([]string, 0, len(keys))
+	insertVals := make([]string, 0, len(keys))
+	insertArgs := make([]interface{}, 0, len(keys))
+	argIndex = 1
+	for _, col := range keys {
+		insertCols = append(insertCols, qb.dialect.QuoteIdentifier(col))
+		insertVals = append(insertVals, qb.dialect.GetPlaceholder(argIndex))
+		insertArgs = append(insertArgs, changes[col])
+		argIndex++
+	}
+
+	insertSQL := fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s)",
+		quotedTable,
+		strings.Join(insertCols, ", "),
+		strings.Join(insertVals, ", "),
+	)
+	insertRes, err := tx.Exec(ctx, insertSQL, insertArgs...)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return insertRes, nil
+}
+
+func sortedMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func normalizeConflictColumns(cols []string) []string {
+	if len(cols) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(cols))
+	seen := map[string]struct{}{}
+	for _, col := range cols {
+		trimmed := strings.TrimSpace(col)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func inferConflictColumnsFromSchema(schema Schema) []string {
+	if schema == nil {
+		return nil
+	}
+	uniqueCols := make([]string, 0)
+	primaryCols := make([]string, 0)
+	for _, f := range schema.Fields() {
+		if f.Unique {
+			uniqueCols = append(uniqueCols, f.Name)
+		}
+		if f.Primary {
+			primaryCols = append(primaryCols, f.Name)
+		}
+	}
+	if len(uniqueCols) > 0 {
+		return normalizeConflictColumns(uniqueCols)
+	}
+	return normalizeConflictColumns(primaryCols)
+}
+
+func nonConflictColumns(keys, conflicts []string) []string {
+	result := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !containsString(conflicts, k) {
+			result = append(result, k)
+		}
+	}
+	return result
+}
+
+func excludePrimaryColumns(schema Schema, columns []string) []string {
+	if schema == nil {
+		return columns
+	}
+	result := make([]string, 0, len(columns))
+	for _, col := range columns {
+		field := schema.GetField(col)
+		if field != nil && field.Primary {
+			continue
+		}
+		result = append(result, col)
+	}
+	return result
+}
+
+func containsString(items []string, target string) bool {
+	for _, it := range items {
+		if it == target {
+			return true
+		}
+	}
+	return false
+}
+
+func buildSQLServerSourceProjection(keys []string, dialect SQLDialect) string {
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, "s."+dialect.QuoteIdentifier(k))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // BuildIR 构建独立查询 IR（中间表示）。
 // 该方法不会生成最终 SQL/Cypher，便于后续接入多语言编译器。
 func (qb *SQLQueryConstructor) BuildIR(ctx context.Context) (*QueryIR, error) {
+	if qb.buildErr != nil {
+		return nil, qb.buildErr
+	}
+
+	if !qb.customQueryMode {
+		for _, f := range qb.selectedCols {
+			if err := qb.validateFieldReference(f, true); err != nil {
+				return nil, err
+			}
+		}
+		for _, o := range qb.orderBys {
+			if err := qb.validateFieldReference(o.Field, false); err != nil {
+				return nil, err
+			}
+		}
+		for _, c := range qb.conditions {
+			if err := qb.validateConditionFields(c); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	projections := append([]string(nil), qb.selectedCols...)
+	if qb.countExpr != nil {
+		projections = []string{*qb.countExpr}
+	}
+
 	ir := &QueryIR{
 		Source: QuerySourceIR{
-			Table: qb.schema.TableName(),
-			Alias: strings.TrimSpace(qb.fromAlias),
+			Table:  qb.schema.TableName(),
+			Alias:  strings.TrimSpace(qb.fromAlias),
+			Schema: qb.schema,
 		},
-		Projections:        append([]string(nil), qb.selectedCols...),
+		Projections:        projections,
 		Conditions:         append([]Condition(nil), qb.conditions...),
 		Limit:              qb.limitVal,
 		Offset:             qb.offsetVal,
@@ -643,9 +1282,13 @@ func (qb *SQLQueryConstructor) BuildIR(ctx context.Context) (*QueryIR, error) {
 	for _, join := range qb.joins {
 		ir.Joins = append(ir.Joins, QueryJoinIR{
 			JoinType: join.joinType,
+			Semantic: join.semantic,
+			Relation: buildQueryJoinRelationIR(qb.schema, join.schema),
 			Table:    join.table,
 			Alias:    join.alias,
 			OnClause: join.onClause,
+			Schema:   join.schema,
+			Filters:  append([]Condition(nil), join.filters...),
 		})
 	}
 

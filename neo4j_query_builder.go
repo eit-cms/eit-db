@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -12,19 +14,24 @@ type Neo4jQueryConstructor struct {
 	schema       Schema
 	compiler     QueryCompiler
 	selectedCols []string
+	countExpr    *string
 	conditions   []Condition
 	orderBys     []OrderBy
 	limitVal     *int
 	offsetVal    *int
 	fromAlias    string
 	joins        []cypherJoinClause
+	customMode   bool
 }
 
 type cypherJoinClause struct {
 	joinType string
+	semantic JoinSemantic // JoinWith: 已解析的语义意图
 	table    string
 	alias    string
 	onClause string
+	schema   Schema       // JoinWith: 目标实体 Schema，nil 表示 raw string JOIN
+	filters  []Condition  // JoinWith: 对连接节点的额外过滤条件
 }
 
 // CypherCompiler 将 QueryIR 编译为 Cypher。
@@ -62,6 +69,11 @@ func (qb *Neo4jQueryConstructor) CrossTableStrategy(strategy CrossTableStrategy)
 	return qb
 }
 
+func (qb *Neo4jQueryConstructor) CustomMode() QueryConstructor {
+	qb.customMode = true
+	return qb
+}
+
 func (qb *Neo4jQueryConstructor) addJoin(joinType, table, onClause string, alias ...string) *Neo4jQueryConstructor {
 	joinAlias := ""
 	if len(alias) > 0 {
@@ -92,11 +104,43 @@ func (qb *Neo4jQueryConstructor) CrossJoin(table string, alias ...string) QueryC
 	return qb.addJoin("CROSS", table, "", alias...)
 }
 
+// JoinWith 使用 JoinBuilder 进行 Schema 感知的连接。
+// Neo4j 端：label 取自 Schema.TableName()；On() 为空时从 Schema FK 约束推断关系类型；
+// Filter() 条件在 WHERE 子句中以 join alias 限定输出。
+func (qb *Neo4jQueryConstructor) JoinWith(builder *JoinBuilder) QueryConstructor {
+	if builder == nil || builder.schema == nil {
+		return qb
+	}
+	table := strings.TrimSpace(builder.schema.TableName())
+	if table == "" {
+		return qb
+	}
+	joinAlias := sanitizeSymbol(builder.alias, "")
+	resolved := resolveJoinSemantic(builder.semantic, qb.schema, builder.schema)
+	qb.joins = append(qb.joins, cypherJoinClause{
+		joinType: semanticToSQLJoinType(resolved), // INNER/LEFT/CROSS → CypherCompiler 映射为 MATCH/OPTIONAL MATCH
+		semantic: resolved,
+		table:    table,
+		alias:    joinAlias,
+		onClause: builder.onClause,
+		schema:   builder.schema,
+		filters:  append([]Condition(nil), builder.filters...),
+	})
+	return qb
+}
+
 func (qb *Neo4jQueryConstructor) Where(condition Condition) QueryConstructor {
 	if condition != nil {
 		qb.conditions = append(qb.conditions, condition)
 	}
 	return qb
+}
+
+func (qb *Neo4jQueryConstructor) WhereWith(builder *WhereBuilder) QueryConstructor {
+	if builder == nil {
+		return qb
+	}
+	return qb.Where(builder.Build())
 }
 
 func (qb *Neo4jQueryConstructor) WhereAll(conditions ...Condition) QueryConstructor {
@@ -114,7 +158,48 @@ func (qb *Neo4jQueryConstructor) WhereAny(conditions ...Condition) QueryConstruc
 }
 
 func (qb *Neo4jQueryConstructor) Select(fields ...string) QueryConstructor {
+	qb.countExpr = nil
 	qb.selectedCols = append(qb.selectedCols, fields...)
+	return qb
+}
+
+func (qb *Neo4jQueryConstructor) Count(fieldName ...string) QueryConstructor {
+	expr := "count(*)"
+	if len(fieldName) > 0 && strings.TrimSpace(fieldName[0]) != "" && strings.TrimSpace(fieldName[0]) != "*" {
+		expr = "count(" + strings.TrimSpace(fieldName[0]) + ")"
+	}
+	qb.countExpr = &expr
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
+	return qb
+}
+
+func (qb *Neo4jQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Count()
+	}
+	field := strings.TrimSpace(builder.field)
+	if field == "" {
+		field = "*"
+	}
+	expr := "count(*)"
+	if field != "*" {
+		if builder.distinct {
+			expr = "count(DISTINCT " + field + ")"
+		} else {
+			expr = "count(" + field + ")"
+		}
+	}
+	if alias := strings.TrimSpace(builder.alias); alias != "" {
+		expr += " AS " + alias
+	}
+	qb.countExpr = &expr
+	qb.selectedCols = nil
+	qb.limitVal = nil
+	qb.offsetVal = nil
+	qb.orderBys = nil
 	return qb
 }
 
@@ -149,13 +234,27 @@ func (qb *Neo4jQueryConstructor) Build(ctx context.Context) (string, []interface
 	return compiler.Compile(ctx, ir)
 }
 
+func (qb *Neo4jQueryConstructor) SelectCount(ctx context.Context, repo *Repository) (int64, error) {
+	return 0, fmt.Errorf("neo4j query constructor does not support SelectCount via SQL-style API")
+}
+
+func (qb *Neo4jQueryConstructor) Upsert(ctx context.Context, repo *Repository, cs *Changeset, conflictColumns ...string) (sql.Result, error) {
+	return nil, fmt.Errorf("neo4j query constructor does not support SQL-style Upsert; use Cypher MERGE workflow")
+}
+
 func (qb *Neo4jQueryConstructor) BuildIR(ctx context.Context) (*QueryIR, error) {
+	projections := append([]string(nil), qb.selectedCols...)
+	if qb.countExpr != nil {
+		projections = []string{*qb.countExpr}
+	}
+
 	ir := &QueryIR{
 		Source: QuerySourceIR{
-			Table: qb.schema.TableName(),
-			Alias: sanitizeSymbol(qb.fromAlias, "n"),
+			Table:  qb.schema.TableName(),
+			Alias:  sanitizeSymbol(qb.fromAlias, "n"),
+			Schema: qb.schema,
 		},
-		Projections: append([]string(nil), qb.selectedCols...),
+		Projections: projections,
 		Conditions:  append([]Condition(nil), qb.conditions...),
 		Limit:       qb.limitVal,
 		Offset:      qb.offsetVal,
@@ -166,9 +265,13 @@ func (qb *Neo4jQueryConstructor) BuildIR(ctx context.Context) (*QueryIR, error) 
 	for _, join := range qb.joins {
 		ir.Joins = append(ir.Joins, QueryJoinIR{
 			JoinType: join.joinType,
+			Semantic: join.semantic,
+			Relation: buildQueryJoinRelationIR(qb.schema, join.schema),
 			Table:    join.table,
 			Alias:    join.alias,
 			OnClause: join.onClause,
+			Schema:   join.schema,
+			Filters:  append([]Condition(nil), join.filters...),
 		})
 	}
 
@@ -204,6 +307,9 @@ func (c *CypherCompiler) Compile(ctx context.Context, ir *QueryIR) (string, []in
 	cypher.WriteString(sourceLabel)
 	cypher.WriteString(")")
 
+	// 记录每个 join 解析后的别名，供后续 Filter 条件限定使用。
+	resolvedJoinAliases := make([]string, len(ir.Joins))
+
 	for i, join := range ir.Joins {
 		joinType := strings.ToUpper(strings.TrimSpace(join.JoinType))
 		if joinType == "" {
@@ -214,6 +320,7 @@ func (c *CypherCompiler) Compile(ctx context.Context, ir *QueryIR) (string, []in
 		}
 
 		joinAlias := sanitizeSymbol(join.Alias, fmt.Sprintf("j%d", i+1))
+		resolvedJoinAliases[i] = joinAlias
 		joinLabel := sanitizeLabel(join.Table, "Node")
 
 		if joinType == "CROSS" {
@@ -226,9 +333,53 @@ func (c *CypherCompiler) Compile(ctx context.Context, ir *QueryIR) (string, []in
 		}
 
 		relType, direction := parseRelationshipSpec(join.OnClause)
+		// JoinWith：OnClause 为空且 Schema 已提供时，从 FK 约束推断关系类型（Out 方向）。
+		if strings.TrimSpace(join.OnClause) == "" && join.Schema != nil {
+			relType = inferNeo4jRelType(ir.Source.Schema, join.Schema)
+			if join.Relation != nil && strings.TrimSpace(join.Relation.Name) != "" {
+				relType = normalizeCypherRelType(join.Relation.Name)
+			}
+			direction = "out"
+		}
 		keyword := "MATCH"
 		if joinType == "LEFT" {
 			keyword = "OPTIONAL MATCH"
+		}
+
+		if join.Relation != nil &&
+			join.Relation.Type == RelationManyToMany &&
+			join.Relation.Through != nil &&
+			strings.TrimSpace(join.Relation.Through.Table) != "" {
+			relEdgeType := "RELATED_TO"
+			if strings.TrimSpace(join.Relation.Name) != "" {
+				relEdgeType = normalizeCypherRelType(join.Relation.Name)
+			}
+			throughAlias := sanitizeSymbol(fmt.Sprintf("m%d", i+1), fmt.Sprintf("m%d", i+1))
+			throughLabel := sanitizeLabel(join.Relation.Through.Table, "Middle")
+			cypher.WriteString(" ")
+			cypher.WriteString(keyword)
+			cypher.WriteString(" (")
+			cypher.WriteString(sourceAlias)
+			cypher.WriteString(")-")
+			cypher.WriteString("[r")
+			cypher.WriteString(strconv.Itoa(i + 1))
+			cypher.WriteString("a:")
+			cypher.WriteString(relEdgeType)
+			cypher.WriteString("]->(")
+			cypher.WriteString(throughAlias)
+			cypher.WriteString(":")
+			cypher.WriteString(throughLabel)
+			cypher.WriteString(")-")
+			cypher.WriteString("[r")
+			cypher.WriteString(strconv.Itoa(i + 1))
+			cypher.WriteString("b:")
+			cypher.WriteString(relEdgeType)
+			cypher.WriteString("]->(")
+			cypher.WriteString(joinAlias)
+			cypher.WriteString(":")
+			cypher.WriteString(joinLabel)
+			cypher.WriteString(")")
+			continue
 		}
 
 		cypher.WriteString(" ")
@@ -238,14 +389,30 @@ func (c *CypherCompiler) Compile(ctx context.Context, ir *QueryIR) (string, []in
 		cypher.WriteString(buildRelationshipPattern(sourceAlias, joinAlias, joinLabel, relAlias, relType, direction))
 	}
 
-	if len(ir.Conditions) > 0 {
-		translator := &CypherConditionTranslator{sourceAlias: sourceAlias, argIndex: &argIndex}
+	// 收集所有过滤条件：主实体条件（source alias 限定）+ 各 join 节点的 Filter 条件（join alias 限定）。
+	type cypherCondEntry struct {
+		cond  Condition
+		alias string
+	}
+	allConds := make([]cypherCondEntry, 0, len(ir.Conditions))
+	for _, c := range ir.Conditions {
+		allConds = append(allConds, cypherCondEntry{c, sourceAlias})
+	}
+	for i, join := range ir.Joins {
+		jAlias := resolvedJoinAliases[i]
+		for _, f := range join.Filters {
+			allConds = append(allConds, cypherCondEntry{f, jAlias})
+		}
+	}
+
+	if len(allConds) > 0 {
 		cypher.WriteString(" WHERE ")
-		for i, cond := range ir.Conditions {
+		for i, ce := range allConds {
 			if i > 0 {
 				cypher.WriteString(" AND ")
 			}
-			clause, clauseArgs, err := cond.Translate(translator)
+			translator := &CypherConditionTranslator{sourceAlias: ce.alias, argIndex: &argIndex}
+			clause, clauseArgs, err := ce.cond.Translate(translator)
 			if err != nil {
 				return "", nil, fmt.Errorf("failed to translate condition: %w", err)
 			}
@@ -451,6 +618,58 @@ func sanitizeLabel(value string, fallback string) string {
 	return v
 }
 
+// inferNeo4jRelType 从通用 Schema FK 约束推断 Neo4j 关系类型（供 JoinWith 无 On 子句时使用）。
+//
+// 推断约定（可通过 On() 显式覆盖；Neo4j 专属深层优化由适配器扩展接口另行提供）：
+//   - joinSchema 持有 FK 指向 sourceSchema → 一对多，source -[:HAS]-> join
+//     （若 FK 字段为 unique → BINDS 表示一对一）
+//   - sourceSchema 持有 FK 指向 joinSchema → 多对一，source -[:HAS]-> join
+//     （若 FK 字段为 unique → BINDS 表示一对一）
+//   - 无法从约束推断 → RELATED_TO（通用兜底）
+func inferNeo4jRelType(sourceSchema, joinSchema Schema) string {
+	if sourceSchema == nil || joinSchema == nil {
+		return "RELATED_TO"
+	}
+
+	// join 持有 FK 指向 source（source HAS_MANY join）
+	if cs, ok := joinSchema.(ConstrainedSchema); ok {
+		for _, tc := range cs.Constraints() {
+			if tc.Kind != ConstraintForeignKey {
+				continue
+			}
+			if !strings.EqualFold(tc.RefTable, sourceSchema.TableName()) {
+				continue
+			}
+			for _, fkField := range tc.Fields {
+				if f := joinSchema.GetField(fkField); f != nil && f.Unique {
+					return "BINDS"
+				}
+			}
+			return "HAS"
+		}
+	}
+
+	// source 持有 FK 指向 join（source BELONGS_TO join，仍用 HAS 表示归属方向）
+	if cs, ok := sourceSchema.(ConstrainedSchema); ok {
+		for _, tc := range cs.Constraints() {
+			if tc.Kind != ConstraintForeignKey {
+				continue
+			}
+			if !strings.EqualFold(tc.RefTable, joinSchema.TableName()) {
+				continue
+			}
+			for _, fkField := range tc.Fields {
+				if f := sourceSchema.GetField(fkField); f != nil && f.Unique {
+					return "BINDS"
+				}
+			}
+			return "HAS"
+		}
+	}
+
+	return "RELATED_TO"
+}
+
 func parseRelationshipSpec(raw string) (string, string) {
 	spec := strings.TrimSpace(raw)
 	if spec == "" {
@@ -502,6 +721,31 @@ func buildRelationshipPattern(sourceAlias, targetAlias, targetLabel, relAlias, r
 	default:
 		return source + "-" + rel + "->" + target
 	}
+}
+
+func normalizeCypherRelType(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "RELATED_TO"
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range trimmed {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToUpper(r))
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteRune('_')
+			lastUnderscore = true
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return "RELATED_TO"
+	}
+	return out
 }
 
 // Neo4jQueryConstructorProvider Neo4j 查询构造器提供者。

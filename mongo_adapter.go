@@ -15,9 +15,11 @@ import (
 
 // MongoAdapter MongoDB 适配器（最小可用版本：连接/健康检查）
 type MongoAdapter struct {
-	client   *mongo.Client
-	database string
-	uri      string
+	client               *mongo.Client
+	database             string
+	uri                  string
+	relationJoinStrategy string
+	hideThroughArtifacts bool
 }
 
 // NewMongoAdapter 创建 MongoAdapter（不建立连接）
@@ -30,8 +32,10 @@ func NewMongoAdapter(config *Config) (*MongoAdapter, error) {
 	}
 	resolved := config.ResolvedMongoConfig()
 	return &MongoAdapter{
-		database: resolved.Database,
-		uri:      resolved.URI,
+		database:             resolved.Database,
+		uri:                  resolved.URI,
+		relationJoinStrategy: resolved.RelationJoinStrategy,
+		hideThroughArtifacts: mongoHideThroughArtifactsEnabled(resolved),
 	}, nil
 }
 
@@ -49,6 +53,8 @@ func (a *MongoAdapter) Connect(ctx context.Context, config *Config) error {
 		resolved := config.ResolvedMongoConfig()
 		uri = resolved.URI
 		a.database = resolved.Database
+		a.relationJoinStrategy = resolved.RelationJoinStrategy
+		a.hideThroughArtifacts = mongoHideThroughArtifactsEnabled(resolved)
 	}
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
@@ -152,6 +158,97 @@ func (a *MongoAdapter) ExecuteCompiledFindPlan(ctx context.Context, query string
 	}
 
 	coll := a.client.Database(a.database).Collection(collection)
+
+	filter := bson.M{}
+	if plan.Filter != nil {
+		filter = plan.Filter
+	}
+
+	// 含 lookup 阶段时改用 aggregate pipeline，以支持跨集合关联。
+	if len(plan.Lookups) > 0 {
+		strategy := normalizeMongoRelationJoinStrategy(a.relationJoinStrategy)
+		pipeline := make([]bson.M, 0, 2+len(plan.Lookups)+3)
+		if len(filter) > 0 {
+			pipeline = append(pipeline, bson.M{"$match": filter})
+		}
+
+		for _, lk := range plan.Lookups {
+			stage, ok := buildMongoLookupStage(lk, strategy)
+			if !ok {
+				continue
+			}
+			pipeline = append(pipeline, stage)
+
+			as := strings.TrimSpace(lk.As)
+			if lk.Semantic == JoinSemanticRequired {
+				pipeline = append(pipeline, bson.M{"$match": bson.M{as + ".0": bson.M{"$exists": true}}})
+			}
+		}
+
+		if a.hideThroughArtifacts {
+			throughFields := collectThroughArtifactFields(plan.Lookups)
+			if len(throughFields) > 0 {
+				pipeline = append(pipeline, bson.M{"$unset": throughFields})
+			}
+		}
+
+		if len(plan.Sort) > 0 {
+			sortSpec := bson.D{}
+			for _, item := range plan.Sort {
+				field := strings.TrimSpace(item.Field)
+				if field == "" {
+					continue
+				}
+				direction := 1
+				if item.Direction < 0 {
+					direction = -1
+				}
+				sortSpec = append(sortSpec, bson.E{Key: field, Value: direction})
+			}
+			if len(sortSpec) > 0 {
+				pipeline = append(pipeline, bson.M{"$sort": sortSpec})
+			}
+		}
+		if plan.Offset != nil {
+			pipeline = append(pipeline, bson.M{"$skip": int64(*plan.Offset)})
+		}
+		if plan.Limit != nil {
+			pipeline = append(pipeline, bson.M{"$limit": int64(*plan.Limit)})
+		}
+		if len(plan.Projection) > 0 {
+			projection := bson.M{}
+			for _, field := range plan.Projection {
+				trimmed := strings.TrimSpace(field)
+				if trimmed == "" {
+					continue
+				}
+				projection[trimmed] = 1
+			}
+			if len(projection) > 0 {
+				pipeline = append(pipeline, bson.M{"$project": projection})
+			}
+		}
+
+		cursor, err := coll.Aggregate(ctx, pipeline)
+		if err != nil {
+			return nil, err
+		}
+		defer cursor.Close(ctx)
+
+		rows := make([]map[string]interface{}, 0)
+		for cursor.Next(ctx) {
+			entry := map[string]interface{}{}
+			if err := cursor.Decode(&entry); err != nil {
+				return nil, err
+			}
+			rows = append(rows, entry)
+		}
+		if err := cursor.Err(); err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+
 	findOpts := options.Find()
 	if len(plan.Projection) > 0 {
 		projection := bson.M{}
@@ -190,11 +287,6 @@ func (a *MongoAdapter) ExecuteCompiledFindPlan(ctx context.Context, query string
 		findOpts.SetSkip(int64(*plan.Offset))
 	}
 
-	filter := bson.M{}
-	if plan.Filter != nil {
-		filter = plan.Filter
-	}
-
 	cursor, err := coll.Find(ctx, filter, findOpts)
 	if err != nil {
 		return nil, err
@@ -214,6 +306,74 @@ func (a *MongoAdapter) ExecuteCompiledFindPlan(ctx context.Context, query string
 	}
 
 	return rows, nil
+}
+
+func normalizeMongoRelationJoinStrategy(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "pipeline" {
+		return "pipeline"
+	}
+	return "lookup"
+}
+
+func mongoHideThroughArtifactsEnabled(cfg *MongoConnectionConfig) bool {
+	if cfg == nil || cfg.HideThroughArtifacts == nil {
+		return true
+	}
+	return *cfg.HideThroughArtifacts
+}
+
+func collectThroughArtifactFields(lookups []MongoLookupStage) []string {
+	fields := make([]string, 0)
+	seen := map[string]bool{}
+	for _, lk := range lookups {
+		as := strings.TrimSpace(lk.As)
+		if as == "" {
+			continue
+		}
+		if !lk.ThroughArtifact && !strings.HasSuffix(as, "_through") {
+			continue
+		}
+		if !seen[as] {
+			fields = append(fields, as)
+			seen[as] = true
+		}
+	}
+	return fields
+}
+
+func buildMongoLookupStage(lk MongoLookupStage, strategy string) (bson.M, bool) {
+	from := strings.TrimSpace(lk.From)
+	localField := strings.TrimSpace(lk.LocalField)
+	foreignField := strings.TrimSpace(lk.ForeignField)
+	as := strings.TrimSpace(lk.As)
+	if from == "" || localField == "" || foreignField == "" || as == "" {
+		return nil, false
+	}
+
+	if normalizeMongoRelationJoinStrategy(strategy) == "pipeline" {
+		localRef := "$$local_join_value"
+		arrayExpr := bson.M{"$cond": bson.A{
+			bson.M{"$isArray": localRef},
+			localRef,
+			bson.A{localRef},
+		}}
+		return bson.M{"$lookup": bson.M{
+			"from": from,
+			"let": bson.M{"local_join_value": "$" + localField},
+			"pipeline": bson.A{
+				bson.M{"$match": bson.M{"$expr": bson.M{"$in": bson.A{"$" + foreignField, arrayExpr}}}},
+			},
+			"as": as,
+		}}, true
+	}
+
+	return bson.M{"$lookup": bson.M{
+		"from":         from,
+		"localField":   localField,
+		"foreignField": foreignField,
+		"as":           as,
+	}}, true
 }
 
 // ExecuteCompiledWritePlan 执行由 MongoQueryConstructor 生成的写入计划。
