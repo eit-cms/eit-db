@@ -635,6 +635,138 @@ func TestSQLQueryConstructorLimitOffset(t *testing.T) {
 	}
 }
 
+func TestSQLQueryConstructorPage(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("name", TypeString).Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.Page(3, 15)
+
+	sql, _, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "LIMIT 15") || !strings.Contains(sql, "OFFSET 30") {
+		t.Fatalf("expected page SQL to include LIMIT 15 OFFSET 30, got: %s", sql)
+	}
+
+	qc = NewSQLQueryConstructor(schema, dialect)
+	qc.Page(0, 0)
+	sql, _, err = qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "LIMIT 20") {
+		t.Fatalf("expected invalid page params to normalize to default page size, got: %s", sql)
+	}
+	if strings.Contains(sql, "OFFSET") {
+		t.Fatalf("expected first page not to emit OFFSET, got: %s", sql)
+	}
+	if !strings.Contains(sql, "ORDER BY `users`.`id` ASC") {
+		t.Fatalf("expected page SQL to append stable primary key order, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorPageAppendsPrimaryKeyTieBreaker(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeTime).Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.OrderBy("created_at", "DESC").Page(2, 10)
+
+	sql, _, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "ORDER BY `users`.`created_at` DESC, `users`.`id` DESC") {
+		t.Fatalf("expected primary key tie-breaker in paged SQL, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorCursorPageAscending(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeTime).Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.CursorPage("created_at", "ASC", "2026-03-21T10:00:00Z", 42, 5)
+
+	sql, args, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "ORDER BY `users`.`created_at` ASC, `users`.`id` ASC") {
+		t.Fatalf("expected stable cursor order, got: %s", sql)
+	}
+	if !strings.Contains(sql, "(`users`.`created_at` > ? OR (`users`.`created_at` = ? AND `users`.`id` > ?))") {
+		t.Fatalf("expected keyset cursor predicate, got: %s", sql)
+	}
+	if len(args) != 3 || args[0] != "2026-03-21T10:00:00Z" || args[1] != "2026-03-21T10:00:00Z" || args[2] != 42 {
+		t.Fatalf("unexpected cursor args: %v", args)
+	}
+	if !strings.Contains(sql, "LIMIT 5") || strings.Contains(sql, "OFFSET") {
+		t.Fatalf("expected cursor page to use limit without offset, got: %s", sql)
+	}
+}
+
+func TestSQLQueryConstructorCursorPageDescendingByPrimaryKey(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.CursorPage("id", "DESC", 100, nil, 3)
+
+	sql, args, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "WHERE `users`.`id` < ?") {
+		t.Fatalf("expected descending primary key cursor predicate, got: %s", sql)
+	}
+	if len(args) != 1 || args[0] != 100 {
+		t.Fatalf("unexpected args: %v", args)
+	}
+}
+
+func TestSQLQueryConstructorCursorPageRequiresMatchingOrder(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeTime).Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.OrderBy("id", "ASC")
+	qc.CursorPage("created_at", "ASC", "2026-03-21T10:00:00Z", 1, 5)
+
+	if _, _, err := qc.Build(context.Background()); err == nil {
+		t.Fatalf("expected mismatched cursor order to fail build")
+	}
+}
+
+func TestSQLQueryConstructorPaginateAutoCursor(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeTime).Build())
+	dialect := NewMySQLDialect()
+
+	qc := NewSQLQueryConstructor(schema, dialect)
+	qc.Paginate(NewPaginationBuilder(1, 4).CursorBy("created_at", "DESC", "2026-03-21T12:00:00Z", 20))
+
+	sql, _, err := qc.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(sql, "WHERE (`users`.`created_at` < ? OR (`users`.`created_at` = ? AND `users`.`id` < ?))") {
+		t.Fatalf("expected auto cursor pagination predicate, got: %s", sql)
+	}
+}
+
 // TestSQLQueryConstructorSelectColumns 测试 SELECT 字段选择
 func TestSQLQueryConstructorSelectColumns(t *testing.T) {
 	schema := NewBaseSchema("users")

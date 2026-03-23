@@ -50,20 +50,20 @@ func (m *Migrator) Register(migration *Migration) error {
 	return fmt.Errorf(migratorV1DisabledMessage)
 
 	/*
-	if migration.Version == "" {
-		return fmt.Errorf("migration version cannot be empty")
-	}
+		if migration.Version == "" {
+			return fmt.Errorf("migration version cannot be empty")
+		}
 
-	if migration.Description == "" {
-		return fmt.Errorf("migration description cannot be empty")
-	}
+		if migration.Description == "" {
+			return fmt.Errorf("migration description cannot be empty")
+		}
 
-	if len(migration.UpSQL) == 0 {
-		return fmt.Errorf("migration UpSQL cannot be empty")
-	}
+		if len(migration.UpSQL) == 0 {
+			return fmt.Errorf("migration UpSQL cannot be empty")
+		}
 
-	m.migrations[migration.Version] = migration
-	return nil
+		m.migrations[migration.Version] = migration
+		return nil
 	*/
 }
 
@@ -72,28 +72,28 @@ func (m *Migrator) Up(ctx context.Context) error {
 	return fmt.Errorf(migratorV1DisabledMessage)
 
 	/*
-	// 创建迁移日志表 (如果不存在)
-	if err := m.createMigrationLogTable(ctx); err != nil {
-		return fmt.Errorf("failed to create migration log table: %w", err)
-	}
+		// 创建迁移日志表 (如果不存在)
+		if err := m.createMigrationLogTable(ctx); err != nil {
+			return fmt.Errorf("failed to create migration log table: %w", err)
+		}
 
-	// 获取已执行的迁移
-	executed, err := m.getExecutedMigrations(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get executed migrations: %w", err)
-	}
+		// 获取已执行的迁移
+		executed, err := m.getExecutedMigrations(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get executed migrations: %w", err)
+		}
 
-	// 执行待执行的迁移
-	for version := range m.migrations {
-		if _, exists := executed[version]; !exists {
-			migration := m.migrations[version]
-			if err := m.runMigration(ctx, migration); err != nil {
-				return fmt.Errorf("failed to execute migration %s: %w", version, err)
+		// 执行待执行的迁移
+		for version := range m.migrations {
+			if _, exists := executed[version]; !exists {
+				migration := m.migrations[version]
+				if err := m.runMigration(ctx, migration); err != nil {
+					return fmt.Errorf("failed to execute migration %s: %w", version, err)
+				}
 			}
 		}
-	}
 
-	return nil
+		return nil
 	*/
 }
 
@@ -102,28 +102,28 @@ func (m *Migrator) Down(ctx context.Context) error {
 	return fmt.Errorf(migratorV1DisabledMessage)
 
 	/*
-	// 获取最后执行的迁移
-	lastMigration, err := m.getLastExecutedMigration(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get last migration: %w", err)
-	}
+		// 获取最后执行的迁移
+		lastMigration, err := m.getLastExecutedMigration(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get last migration: %w", err)
+		}
 
-	if lastMigration == nil {
-		return fmt.Errorf("no migrations to rollback")
-	}
+		if lastMigration == nil {
+			return fmt.Errorf("no migrations to rollback")
+		}
 
-	// 查找迁移对象
-	migration, exists := m.migrations[lastMigration.Version]
-	if !exists {
-		return fmt.Errorf("migration %s not found", lastMigration.Version)
-	}
+		// 查找迁移对象
+		migration, exists := m.migrations[lastMigration.Version]
+		if !exists {
+			return fmt.Errorf("migration %s not found", lastMigration.Version)
+		}
 
-	// 执行回滚
-	if err := m.rollbackMigration(ctx, migration); err != nil {
-		return fmt.Errorf("failed to rollback migration %s: %w", migration.Version, err)
-	}
+		// 执行回滚
+		if err := m.rollbackMigration(ctx, migration); err != nil {
+			return fmt.Errorf("failed to rollback migration %s: %w", migration.Version, err)
+		}
 
-	return nil
+		return nil
 	*/
 }
 
@@ -132,28 +132,28 @@ func (m *Migrator) Status(ctx context.Context) ([]map[string]interface{}, error)
 	return nil, fmt.Errorf(migratorV1DisabledMessage)
 
 	/*
-	executed, err := m.getExecutedMigrations(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get executed migrations: %w", err)
-	}
-
-	var status []map[string]interface{}
-
-	for version, migration := range m.migrations {
-		item := map[string]interface{}{
-			"version":     version,
-			"description": migration.Description,
-			"status":      "pending",
+		executed, err := m.getExecutedMigrations(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get executed migrations: %w", err)
 		}
 
-		if _, exists := executed[version]; exists {
-			item["status"] = "executed"
+		var status []map[string]interface{}
+
+		for version, migration := range m.migrations {
+			item := map[string]interface{}{
+				"version":     version,
+				"description": migration.Description,
+				"status":      "pending",
+			}
+
+			if _, exists := executed[version]; exists {
+				item["status"] = "executed"
+			}
+
+			status = append(status, item)
 		}
 
-		status = append(status, item)
-	}
-
-	return status, nil
+		return status, nil
 	*/
 }
 

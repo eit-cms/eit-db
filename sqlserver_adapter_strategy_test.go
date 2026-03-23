@@ -6,14 +6,14 @@ func TestSQLServerAdapterProviderUsesConfiguredManyToManyStrategy(t *testing.T) 
 	cfg := &Config{
 		Adapter: "sqlserver",
 		SQLServer: &SQLServerConnectionConfig{
-			Host:               "localhost",
-			Port:               1433,
-			Username:           "sa",
-			Database:           "master",
-			ManyToManyStrategy: "recursive_cte",
-			RecursiveCTEDepth:  15,
+			Host:                     "localhost",
+			Port:                     1433,
+			Username:                 "sa",
+			Database:                 "master",
+			ManyToManyStrategy:       "recursive_cte",
+			RecursiveCTEDepth:        15,
 			RecursiveCTEMaxRecursion: 300,
-			DSN:                "sqlserver://sa:pass@localhost:1433?database=master&encrypt=disable",
+			DSN:                      "sqlserver://sa:pass@localhost:1433?database=master&encrypt=disable",
 		},
 	}
 

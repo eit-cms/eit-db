@@ -262,7 +262,7 @@ func TestPostgreSQLListScheduledTasks(t *testing.T) {
 	t.Logf("✓ PostgreSQL ListScheduledTasks passed (count: %d)", len(tasks))
 }
 
-// TestMySQLRegisterScheduledTask 测试 MySQL 不支持定时任务
+// TestMySQLRegisterScheduledTask 测试 MySQL 通过回退调度器支持定时任务
 func TestMySQLRegisterScheduledTask(t *testing.T) {
 	mysqlHost := os.Getenv("MYSQL_HOST")
 	mysqlUser := os.Getenv("MYSQL_USER")
@@ -299,14 +299,26 @@ func TestMySQLRegisterScheduledTask(t *testing.T) {
 	}
 
 	err = repo.RegisterScheduledTask(ctx, task)
-	if err == nil {
-		t.Error("expected error for MySQL RegisterScheduledTask, got nil")
+	if err != nil {
+		t.Fatalf("expected fallback scheduler to register mysql task, got error: %v", err)
 	}
 
-	t.Logf("✓ MySQL correctly returns not supported error")
+	tasks, err := repo.ListScheduledTasks(ctx)
+	if err != nil {
+		t.Fatalf("list scheduled tasks failed: %v", err)
+	}
+	if len(tasks) == 0 {
+		t.Fatalf("expected fallback task to be listed")
+	}
+
+	if err := repo.UnregisterScheduledTask(ctx, task.Name); err != nil {
+		t.Fatalf("unregister scheduled task failed: %v", err)
+	}
+
+	t.Logf("✓ MySQL fallback scheduler supports register/list/unregister")
 }
 
-// TestSQLiteRegisterScheduledTask 测试 SQLite 不支持定时任务
+// TestSQLiteRegisterScheduledTask 测试 SQLite 通过回退调度器支持定时任务
 func TestSQLiteRegisterScheduledTask(t *testing.T) {
 	config := &Config{
 		Adapter:  "sqlite",
@@ -330,11 +342,23 @@ func TestSQLiteRegisterScheduledTask(t *testing.T) {
 	}
 
 	err = repo.RegisterScheduledTask(ctx, task)
-	if err == nil {
-		t.Error("expected error for SQLite RegisterScheduledTask, got nil")
+	if err != nil {
+		t.Fatalf("expected fallback scheduler to register sqlite task, got error: %v", err)
 	}
 
-	t.Logf("✓ SQLite correctly returns not supported error")
+	tasks, err := repo.ListScheduledTasks(ctx)
+	if err != nil {
+		t.Fatalf("list scheduled tasks failed: %v", err)
+	}
+	if len(tasks) == 0 {
+		t.Fatalf("expected fallback task to be listed")
+	}
+
+	if err := repo.UnregisterScheduledTask(ctx, task.Name); err != nil {
+		t.Fatalf("unregister scheduled task failed: %v", err)
+	}
+
+	t.Logf("✓ SQLite fallback scheduler supports register/list/unregister")
 }
 
 // TestInvalidScheduledTaskConfig 测试无效的任务配置
@@ -393,4 +417,50 @@ func TestUnregisterScheduledTaskEmptyName(t *testing.T) {
 	}
 
 	t.Log("✓ Empty task name properly rejected")
+}
+
+func TestSQLiteScheduledTaskFallbackDisabled(t *testing.T) {
+	disabled := false
+	config := &Config{
+		Adapter:                      "sqlite",
+		Database:                     ":memory:",
+		EnableScheduledTaskFallback: &disabled,
+	}
+
+	repo, err := NewRepository(config)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	task := &ScheduledTaskConfig{
+		Name: "test_task_fallback_disabled",
+		Type: TaskTypeMonthlyTableCreation,
+		Config: map[string]interface{}{
+			"tableName": "test_logs",
+		},
+	}
+
+	err = repo.RegisterScheduledTask(ctx, task)
+	if err == nil {
+		t.Fatalf("expected adapter native error when fallback is disabled")
+	}
+}
+
+func TestConfigScheduledTaskFallbackEnabledDefaultAndOption(t *testing.T) {
+	cfg := &Config{}
+	if !cfg.ScheduledTaskFallbackEnabled() {
+		t.Fatalf("expected default scheduled task fallback enabled")
+	}
+
+	cfg = &Config{Options: map[string]interface{}{"scheduled_task_fallback": false}}
+	if cfg.ScheduledTaskFallbackEnabled() {
+		t.Fatalf("expected fallback disabled from options boolean")
+	}
+
+	cfg = &Config{Options: map[string]interface{}{"scheduled_task_fallback": "false"}}
+	if cfg.ScheduledTaskFallbackEnabled() {
+		t.Fatalf("expected fallback disabled from options string")
+	}
 }

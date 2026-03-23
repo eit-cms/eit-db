@@ -171,6 +171,12 @@ Neo4j Adapter 通过 `ExecuteCustomFeature` 暴露以下图特色能力（返回
 | `relationship_association_query` | 方向可控的关系查询（in/out/both） |
 | `relationship_with_payload` | 创建/更新带属性的关系边 |
 | `bidirectional_relationship_semantics` | 单向申请 → 双向关系的语义转换（如好友请求） |
+| `social_model_one_to_one_chat` | 一对一聊天模型：仅双向 FRIEND 或双向 FOLLOWS 可发送消息 |
+| `social_model_group_chat_room` | 多人聊天室模型：ChatRoom 单元 + 双向 IN 发言权限 + 单向 IN 入群申请 |
+| `social_model_chat_receipt` | 聊天已读回执模型：使用 `READ_BY` 关系表达消息读取状态 |
+| `social_model_chat_moderation` | 聊天治理模型：使用 `MUTED_IN` / `BANNED_IN` 关系控制发言权限 |
+| `social_model_message_emoji` | 消息 Emoji 嵌入模型：`INCLUDED_BY(index)` 关系绑定 `{{0}}` 占位符 |
+| `social_network_preset_model` | 统一社交预设入口（含 one_to_one_chat / group_chat_room） |
 
 ```go
 // 图遍历：从某类节点出发，沿某类关系最多遍历 3 层
@@ -190,6 +196,146 @@ result, err = repo.GetAdapter().ExecuteCustomFeature(ctx, "bidirectional_relatio
     "to_id":                 "u2",
 })
 ```
+
+## 社交聊天预设模型（新增）
+
+这组模型是专门为社交场景准备的预设能力，核心目标是把“可聊天关系判断”“发言权限判断”“消息引用关系”在图模型层一次定义好，避免上层业务重复拼接复杂 Cypher。
+
+### 1) 一对一聊天模型（`one_to_one_chat`）
+
+规则：
+
+1. 只有双向 `FRIEND` 或双向 `FOLLOWS` 的用户对，才允许发送私聊消息。
+2. 消息是中间节点 `ChatMessage`，通过 `(:User)-[:SENT]->(:ChatMessage)-[:TO]->(:User)` 表达发送链路。
+3. 支持 `REF` 关系引用历史消息。
+4. 默认包含 `chat_message_fulltext` 全文索引（`ChatMessage.content`），可直接做消息检索。
+5. 提供高级检索模板：支持时间窗口、软删除过滤和 @ 命中加权。
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_model_one_to_one_chat", map[string]interface{}{})
+if err != nil {
+    panic(err)
+}
+queries := out.(map[string]interface{})["queries"].(map[string]string)
+
+// queries["send_direct_message"]
+// queries["can_chat_check"]
+// queries["list_direct_messages"]
+// queries["search_direct_messages"]
+// queries["search_direct_messages_advanced"]
+```
+
+### 2) 多人聊天室模型（`group_chat_room`）
+
+规则：
+
+1. 聊天单元为 `ChatRoom`，可由创建者关系 `(:User)-[:CREATED]->(:ChatRoom)` 建立。
+2. 房间名上层可传入，未传时默认名为 `room`。
+3. 单向 `(:User)-[:IN]->(:ChatRoom)` 表示入群申请，双向 `IN` 表示正式成员并具备发言权限。
+4. 在房间消息中可使用 `AT` 关联被提及用户，使用 `REF` 引用其他消息。
+5. 默认包含 `chat_message_fulltext` 全文索引，并提供房间内消息检索模板。
+6. 提供高级检索模板：支持时间窗口、软删除过滤和 @ 命中加权。
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_network_preset_model", map[string]interface{}{
+    "preset": "group_chat_room",
+})
+if err != nil {
+    panic(err)
+}
+queries := out.(map[string]interface{})["queries"].(map[string]string)
+
+// queries["create_room"]      // 默认 room 名称逻辑
+// queries["request_join_room"]
+// queries["approve_join_room"]
+// queries["send_room_message"] // 双向 IN 才可发言
+// queries["at_user"]
+// queries["ref_message"]
+// queries["search_room_messages"]
+// queries["search_room_messages_advanced"]
+```
+
+### 3) 统一预设入口
+
+你也可以用统一入口按名称拿到预设：
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_network_preset_model", map[string]interface{}{
+    "preset": "one_to_one_chat", // 或 group_chat_room
+})
+```
+
+### 4) 已读回执模型（`chat_receipt`）
+
+核心语义：
+
+1. 已读是一个关系事实，不是消息属性，使用 `(:User)-[:READ_BY]->(:ChatMessage)` 表达。
+2. 直接聊天和群聊都复用同一回执关系，避免上层维护两套已读逻辑。
+3. 默认包含 `chat_message_fulltext` 索引，便于与“未读消息检索”组合使用。
+
+### 6) 消息 Emoji 嵌入模型（`message_emoji`）
+
+核心语义：
+
+1. 消息文本中使用数字占位符（例如 `{{0}}`、`{{1}}`）表达嵌入点。
+2. 通过关系 `(:Emoji)-[:INCLUDED_BY {index: n}]->(:ChatMessage)` 绑定占位符和 Emoji 节点。
+3. Emoji 节点是静态可复用节点，可被多个消息复用引用。
+4. 上层可先取 `render_message_emoji_payload`，再按 index 替换模板中的 `{{index}}`。
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_model_message_emoji", map[string]interface{}{})
+if err != nil {
+    panic(err)
+}
+queries := out.(map[string]interface{})["queries"].(map[string]string)
+
+// queries["attach_emoji_to_message"]
+// queries["list_message_emojis"]
+// queries["render_message_emoji_payload"]
+```
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_model_chat_receipt", map[string]interface{}{})
+if err != nil {
+    panic(err)
+}
+queries := out.(map[string]interface{})["queries"].(map[string]string)
+
+// queries["mark_direct_message_read"]
+// queries["mark_room_message_read"]
+// queries["list_direct_unread"]
+// queries["list_room_unread"]
+```
+
+### 5) 聊天治理模型（`chat_moderation`）
+
+核心语义：
+
+1. 禁言使用 `MUTED_IN` 关系，封禁使用 `BANNED_IN` 关系，治理规则沉淀在图关系层。
+2. 提供 `can_send_room_message` 查询模板，API 层可在发消息前执行权限门禁，避免绕过上层校验。
+
+```go
+out, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "social_network_preset_model", map[string]interface{}{
+    "preset": "chat_moderation",
+})
+if err != nil {
+    panic(err)
+}
+queries := out.(map[string]interface{})["queries"].(map[string]string)
+
+// queries["mute_member"]
+// queries["ban_member"]
+// queries["can_send_room_message"]
+```
+
+## 为什么图数据库更适合在数据层实现关系建模
+
+对于社交/聊天类系统，图数据库的优势不只在查询速度，更在于“关系语义可被数据库直接约束和复用”：
+
+1. 关系规则下沉到数据层：例如“必须双向关系才能私聊”“双向 IN 才能发群消息”，可以直接在 Cypher 条件中判定。
+2. API 更安全：上层 API 不需要在多个服务重复实现权限判断，可复用 `can_chat_check`、`can_send_room_message` 这类模板。
+3. 降低越权风险：把权限关系（READ_BY、MUTED_IN、BANNED_IN）建模为图关系后，越权路径更容易被统一拦截。
+4. 复杂关系可持续演进：随着业务增长，可在模型上新增关系类型而无需重构大量中间表与联表逻辑。
 
 ## 全文搜索
 

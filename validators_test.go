@@ -51,6 +51,51 @@ func TestRangeValidator(t *testing.T) {
 	}
 }
 
+func TestValidationLocaleHelpersAndRangeBoundaries(t *testing.T) {
+	if !ValidationLocaleExists("zh-CN") {
+		t.Fatalf("expected zh-CN validation profile to exist")
+	}
+	if ValidationLocaleExists("missing-locale") {
+		t.Fatalf("expected missing locale to be absent")
+	}
+
+	if err := NewMinRangeValidator(10).Validate(9); err == nil {
+		t.Fatalf("expected min-only range validator to reject 9")
+	}
+	if err := NewMinRangeValidator(10).Validate(10); err != nil {
+		t.Fatalf("expected min-only range validator to accept 10, got %v", err)
+	}
+	if err := NewMaxRangeValidator(20).Validate(21); err == nil {
+		t.Fatalf("expected max-only range validator to reject 21")
+	}
+	if err := NewMaxRangeValidator(20).Validate(uint32(20)); err != nil {
+		t.Fatalf("expected max-only range validator to accept uint32, got %v", err)
+	}
+
+	if err := (&MinLengthValidator{Length: 3}).Validate("ab"); err == nil {
+		t.Fatalf("expected min length validator to reject short string")
+	}
+	if err := (&MaxLengthValidator{Length: 3}).Validate("abcd"); err == nil {
+		t.Fatalf("expected max length validator to reject long string")
+	}
+	if err := (&MinLengthValidator{Length: 3}).Validate("abcd"); err != nil {
+		t.Fatalf("expected min length validator to accept long enough string, got %v", err)
+	}
+	if err := (&MaxLengthValidator{Length: 3}).Validate("abc"); err != nil {
+		t.Fatalf("expected max length validator to accept boundary string, got %v", err)
+	}
+
+	if err := NewEmailValidatorForLocale("en-US").Validate("user@example.com"); err != nil {
+		t.Fatalf("expected locale-specific email validator to work, got %v", err)
+	}
+	if err := NewPostalCodeValidatorForLocale("en-US").Validate("94105"); err != nil {
+		t.Fatalf("expected locale-specific postal validator to work, got %v", err)
+	}
+	if err := NewIDCardValidatorForLocale("en-US").Validate("123-45-6789"); err != nil {
+		t.Fatalf("expected locale-specific id validator to work, got %v", err)
+	}
+}
+
 func TestPhoneAndEmailValidatorsAsRegexSpecialCases(t *testing.T) {
 	emailValidator := &EmailValidator{}
 	if err := emailValidator.Validate("user@example.com"); err != nil {

@@ -3,9 +3,13 @@ package db
 import (
 	"context"
 	"database/sql"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
+	"text/template"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -360,7 +364,7 @@ func buildMongoLookupStage(lk MongoLookupStage, strategy string) (bson.M, bool) 
 		}}
 		return bson.M{"$lookup": bson.M{
 			"from": from,
-			"let": bson.M{"local_join_value": "$" + localField},
+			"let":  bson.M{"local_join_value": "$" + localField},
 			"pipeline": bson.A{
 				bson.M{"$match": bson.M{"$expr": bson.M{"$in": bson.A{"$" + foreignField, arrayExpr}}}},
 			},
@@ -521,7 +525,7 @@ func (a *MongoAdapter) InspectFullTextRuntime(ctx context.Context) (*FullTextRun
 // HasCustomFeatureImplementation 声明 MongoDB 可用的自定义能力
 func (a *MongoAdapter) HasCustomFeatureImplementation(feature string) bool {
 	switch feature {
-	case "foreign_keys", "composite_foreign_keys", "custom_joiner", "document_join", "full_text_search", "tokenized_full_text_search":
+	case "foreign_keys", "composite_foreign_keys", "custom_joiner", "document_join", "full_text_search", "tokenized_full_text_search", "log_hot_words", "log_special_tokenization", "log_hot_words_by_level", "log_hot_words_by_time_window", "article_draft_management", "article_template_rendering", "article_template_preset_library", "article_draft_query_plan":
 		return true
 	default:
 		return false
@@ -630,9 +634,1045 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			"tokens":     tokens,
 			"pipeline":   pipeline,
 		}, nil
+	case "log_special_tokenization":
+		texts := extractLogTextsFromInput(input)
+		if len(texts) == 0 {
+			if text, _ := input["text"].(string); strings.TrimSpace(text) != "" {
+				texts = []string{text}
+			}
+		}
+		if len(texts) == 0 {
+			return nil, fmt.Errorf("mongodb log_special_tokenization requires text/texts/logs/documents")
+		}
+
+		rules := parseStringSlice(input["rules"])
+		if len(rules) == 0 {
+			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+		}
+
+		items := make([]map[string]interface{}, 0, len(texts))
+		for _, text := range texts {
+			tokens, ruleHits := tokenizeLogWithRules(text, rules)
+			items = append(items, map[string]interface{}{
+				"text":      text,
+				"tokens":    tokens,
+				"rule_hits": ruleHits,
+			})
+		}
+
+		return map[string]interface{}{
+			"engine":   "mongodb",
+			"strategy": "log_special_tokenization",
+			"rules":    rules,
+			"items":    items,
+		}, nil
+	case "log_hot_words":
+		texts := extractLogTextsFromInput(input)
+		if len(texts) == 0 {
+			return nil, fmt.Errorf("mongodb log_hot_words requires logs/texts/documents")
+		}
+
+		topK := 20
+		if v, ok := input["top_k"].(int); ok && v > 0 {
+			topK = v
+		}
+		if v, ok := input["top_k"].(float64); ok && int(v) > 0 {
+			topK = int(v)
+		}
+
+		minLen := 2
+		if v, ok := input["min_token_len"].(int); ok && v > 0 {
+			minLen = v
+		}
+		if v, ok := input["min_token_len"].(float64); ok && int(v) > 0 {
+			minLen = int(v)
+		}
+
+		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		rules := parseStringSlice(input["rules"])
+		if len(rules) == 0 {
+			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+		}
+
+		freq := make(map[string]int)
+		for _, text := range texts {
+			tokens, _ := tokenizeLogWithRules(text, rules)
+			for _, token := range tokens {
+				normalized := strings.ToLower(strings.TrimSpace(token))
+				if normalized == "" {
+					continue
+				}
+				if len([]rune(normalized)) < minLen {
+					continue
+				}
+				if stopWords[normalized] {
+					continue
+				}
+				freq[normalized]++
+			}
+		}
+
+		type kv struct {
+			Token string
+			Count int
+		}
+		ranked := make([]kv, 0, len(freq))
+		for token, count := range freq {
+			ranked = append(ranked, kv{Token: token, Count: count})
+		}
+		sort.Slice(ranked, func(i, j int) bool {
+			if ranked[i].Count == ranked[j].Count {
+				return ranked[i].Token < ranked[j].Token
+			}
+			return ranked[i].Count > ranked[j].Count
+		})
+		if topK < len(ranked) {
+			ranked = ranked[:topK]
+		}
+
+		hotWords := make([]map[string]interface{}, 0, len(ranked))
+		for _, item := range ranked {
+			hotWords = append(hotWords, map[string]interface{}{
+				"token": item.Token,
+				"count": item.Count,
+			})
+		}
+
+		return map[string]interface{}{
+			"engine":       "mongodb",
+			"strategy":     "log_hot_words",
+			"total_logs":   len(texts),
+			"top_k":        topK,
+			"min_token_len": minLen,
+			"rules":        rules,
+			"hot_words":    hotWords,
+		}, nil
+	case "log_hot_words_by_level":
+		texts := extractLogTextsFromInput(input)
+		if len(texts) == 0 {
+			return nil, fmt.Errorf("mongodb log_hot_words_by_level requires logs/texts/documents")
+		}
+
+		topK := 20
+		if v, ok := input["top_k"].(int); ok && v > 0 {
+			topK = v
+		}
+		if v, ok := input["top_k"].(float64); ok && int(v) > 0 {
+			topK = int(v)
+		}
+
+		minLen := 2
+		if v, ok := input["min_token_len"].(int); ok && v > 0 {
+			minLen = v
+		}
+		if v, ok := input["min_token_len"].(float64); ok && int(v) > 0 {
+			minLen = int(v)
+		}
+
+		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		rules := parseStringSlice(input["rules"])
+		if len(rules) == 0 {
+			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+		}
+
+		levelField, _ := input["level_field"].(string)
+		if levelField == "" {
+			levelField = "level"
+		}
+
+		freqByLevel := make(map[string]map[string]int)
+		for _, logEntry := range texts {
+			level := extractLogLevel(logEntry, levelField)
+			if _, ok := freqByLevel[level]; !ok {
+				freqByLevel[level] = make(map[string]int)
+			}
+
+			tokens, _ := tokenizeLogWithRules(logEntry, rules)
+			for _, token := range tokens {
+				normalized := strings.ToLower(strings.TrimSpace(token))
+				if normalized == "" {
+					continue
+				}
+				if len([]rune(normalized)) < minLen {
+					continue
+				}
+				if stopWords[normalized] {
+					continue
+				}
+				freqByLevel[level][normalized]++
+			}
+		}
+
+		type kv struct {
+			Token string
+			Count int
+		}
+
+		resultByLevel := make(map[string][]map[string]interface{})
+		for level, freq := range freqByLevel {
+			ranked := make([]kv, 0, len(freq))
+			for token, count := range freq {
+				ranked = append(ranked, kv{Token: token, Count: count})
+			}
+			sort.Slice(ranked, func(i, j int) bool {
+				if ranked[i].Count == ranked[j].Count {
+					return ranked[i].Token < ranked[j].Token
+				}
+				return ranked[i].Count > ranked[j].Count
+			})
+			if topK < len(ranked) {
+				ranked = ranked[:topK]
+			}
+
+			hotWords := make([]map[string]interface{}, 0, len(ranked))
+			for _, item := range ranked {
+				hotWords = append(hotWords, map[string]interface{}{
+					"token": item.Token,
+					"count": item.Count,
+				})
+			}
+			resultByLevel[level] = hotWords
+		}
+
+		return map[string]interface{}{
+			"engine":        "mongodb",
+			"strategy":      "log_hot_words_by_level",
+			"total_logs":    len(texts),
+			"top_k":         topK,
+			"level_field":   levelField,
+			"min_token_len": minLen,
+			"rules":         rules,
+			"hot_words":     resultByLevel,
+		}, nil
+	case "log_hot_words_by_time_window":
+		texts := extractLogTextsFromInput(input)
+		if len(texts) == 0 {
+			return nil, fmt.Errorf("mongodb log_hot_words_by_time_window requires logs/texts/documents")
+		}
+
+		topK := 20
+		if v, ok := input["top_k"].(int); ok && v > 0 {
+			topK = v
+		}
+		if v, ok := input["top_k"].(float64); ok && int(v) > 0 {
+			topK = int(v)
+		}
+
+		minLen := 2
+		if v, ok := input["min_token_len"].(int); ok && v > 0 {
+			minLen = v
+		}
+		if v, ok := input["min_token_len"].(float64); ok && int(v) > 0 {
+			minLen = int(v)
+		}
+
+		timeWindow, _ := input["time_window"].(string)
+		if timeWindow == "" {
+			timeWindow = "hour"
+		}
+
+		timestampField, _ := input["timestamp_field"].(string)
+		if timestampField == "" {
+			timestampField = "timestamp"
+		}
+
+		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		rules := parseStringSlice(input["rules"])
+		if len(rules) == 0 {
+			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+		}
+
+		freqByWindow := groupLogsByTimeWindow(texts, timestampField, timeWindow)
+
+		type kv struct {
+			Token string
+			Count int
+		}
+
+		resultByWindow := make(map[string][]map[string]interface{})
+		for windowKey, logs := range freqByWindow {
+			freq := make(map[string]int)
+			for _, log := range logs {
+				tokens, _ := tokenizeLogWithRules(log, rules)
+				for _, token := range tokens {
+					normalized := strings.ToLower(strings.TrimSpace(token))
+					if normalized == "" {
+						continue
+					}
+					if len([]rune(normalized)) < minLen {
+						continue
+					}
+					if stopWords[normalized] {
+						continue
+					}
+					freq[normalized]++
+				}
+			}
+
+			ranked := make([]kv, 0, len(freq))
+			for token, count := range freq {
+				ranked = append(ranked, kv{Token: token, Count: count})
+			}
+			sort.Slice(ranked, func(i, j int) bool {
+				if ranked[i].Count == ranked[j].Count {
+					return ranked[i].Token < ranked[j].Token
+				}
+				return ranked[i].Count > ranked[j].Count
+			})
+			if topK < len(ranked) {
+				ranked = ranked[:topK]
+			}
+
+			hotWords := make([]map[string]interface{}, 0, len(ranked))
+			for _, item := range ranked {
+				hotWords = append(hotWords, map[string]interface{}{
+					"token": item.Token,
+					"count": item.Count,
+				})
+			}
+			resultByWindow[windowKey] = hotWords
+		}
+
+		return map[string]interface{}{
+			"engine":            "mongodb",
+			"strategy":          "log_hot_words_by_time_window",
+			"total_logs":        len(texts),
+			"time_window":       timeWindow,
+			"timestamp_field":   timestampField,
+			"top_k":             topK,
+			"min_token_len":     minLen,
+			"rules":             rules,
+			"hot_words":         resultByWindow,
+		}, nil
+	case "article_draft_management":
+		return executeArticleDraftManagement(input)
+	case "article_template_rendering":
+		return executeArticleTemplateRendering(input)
+	case "article_template_preset_library":
+		return executeArticleTemplatePresetLibrary(input)
+	case "article_draft_query_plan":
+		return buildArticleDraftQueryPlan(input)
 	default:
 		return nil, fmt.Errorf("mongodb custom feature not supported: %s", feature)
 	}
+}
+
+func parseStringSlice(raw interface{}) []string {
+	if raw == nil {
+		return nil
+	}
+	if arr, ok := raw.([]string); ok {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	}
+	if arr, ok := raw.([]interface{}); ok {
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			s = strings.TrimSpace(s)
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func extractLogTextsFromInput(input map[string]interface{}) []string {
+	if input == nil {
+		return nil
+	}
+	if logs := parseStringSlice(input["logs"]); len(logs) > 0 {
+		return logs
+	}
+	if texts := parseStringSlice(input["texts"]); len(texts) > 0 {
+		return texts
+	}
+
+	messageField := "message"
+	if v, ok := input["message_field"].(string); ok && strings.TrimSpace(v) != "" {
+		messageField = strings.TrimSpace(v)
+	}
+
+	if docs, ok := input["documents"].([]map[string]interface{}); ok {
+		out := make([]string, 0, len(docs))
+		for _, doc := range docs {
+			if s, ok := doc[messageField].(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	if docs, ok := input["documents"].([]interface{}); ok {
+		out := make([]string, 0, len(docs))
+		for _, raw := range docs {
+			doc, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if s, ok := doc[messageField].(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func buildStopWordsSet(extra []string) map[string]bool {
+	defaults := []string{"the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is", "are", "at", "from", "with", "log", "info", "warn", "error", "debug"}
+	out := make(map[string]bool, len(defaults)+len(extra))
+	for _, word := range defaults {
+		out[word] = true
+	}
+	for _, word := range extra {
+		normalized := strings.ToLower(strings.TrimSpace(word))
+		if normalized != "" {
+			out[normalized] = true
+		}
+	}
+	return out
+}
+
+func tokenizeLogWithRules(text string, rules []string) ([]string, map[string][]string) {
+	base := tokenizeSearchTerms(text)
+	out := make([]string, 0, len(base)+8)
+	seen := make(map[string]struct{}, len(base)+8)
+	for _, token := range base {
+		normalized := strings.TrimSpace(token)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+
+	ruleHits := make(map[string][]string)
+	for _, rule := range rules {
+		rule = strings.ToLower(strings.TrimSpace(rule))
+		if rule == "" {
+			continue
+		}
+		var re *regexp.Regexp
+		switch rule {
+		case "ip":
+			re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+		case "url":
+			re = regexp.MustCompile(`https?://[^\s]+`)
+		case "error_code":
+			re = regexp.MustCompile(`\b(?:ERR|E|HTTP)[-_]?[A-Z0-9]{2,}\b`)
+		case "trace_id":
+			re = regexp.MustCompile(`\b[0-9a-fA-F]{16,32}\b`)
+		case "hashtag":
+			re = regexp.MustCompile(`#[-_\p{L}\p{N}]+`)
+		default:
+			continue
+		}
+
+		matches := re.FindAllString(text, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		for _, m := range matches {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			ruleHits[rule] = append(ruleHits[rule], m)
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
+
+	return out, ruleHits
+}
+
+func extractLogLevel(logEntry string, levelField string) string {
+	// 尝试从JSON中提取level字段
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(logEntry), &data); err == nil {
+		if level, ok := data[levelField].(string); ok && level != "" {
+			return strings.ToUpper(strings.TrimSpace(level))
+		}
+	}
+
+	// 从文本中提取常见的日志级别
+	lowerEntry := strings.ToLower(logEntry)
+	levels := []string{"error", "warn", "warning", "info", "debug", "trace", "critical", "panic", "fatal"}
+	for _, level := range levels {
+		if strings.Contains(lowerEntry, "["+level+"]") || strings.Contains(lowerEntry, " "+level+" ") {
+			return strings.ToUpper(level)
+		}
+	}
+
+	return "UNKNOWN"
+}
+
+func groupLogsByTimeWindow(texts []string, timestampField string, timeWindow string) map[string][]string {
+	result := make(map[string][]string)
+	for _, logEntry := range texts {
+		var timestamp time.Time
+
+		// 尝试从JSON中提取时间戳
+		var data map[string]interface{}
+		if err := json.Unmarshal([]byte(logEntry), &data); err == nil {
+			if ts, ok := data[timestampField]; ok {
+				// 尝试解析为字符串
+				if tsStr, ok := ts.(string); ok {
+					if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
+						timestamp = t
+					} else if t, err := time.Parse("2006-01-02 15:04:05", tsStr); err == nil {
+						timestamp = t
+					} else if t, err := time.Parse(time.RFC1123Z, tsStr); err == nil {
+						timestamp = t
+					}
+				}
+			}
+		}
+
+		// 如果解析失败，使用当前时间
+		if timestamp.IsZero() {
+			timestamp = time.Now()
+		}
+
+		// 按时间窗口分组
+		var windowKey string
+		switch strings.ToLower(strings.TrimSpace(timeWindow)) {
+		case "day":
+			windowKey = timestamp.Format("2006-01-02")
+		case "hour":
+			fallthrough
+		default:
+			windowKey = timestamp.Format("2006-01-02 15:00:00")
+		}
+
+		if _, ok := result[windowKey]; !ok {
+			result[windowKey] = make([]string, 0)
+		}
+		result[windowKey] = append(result[windowKey], logEntry)
+	}
+
+	return result
+}
+
+func executeArticleDraftManagement(input map[string]interface{}) (interface{}, error) {
+	// 获取操作类型
+	operation, _ := input["operation"].(string)
+	if operation == "" {
+		operation = "info"
+	}
+	
+	// 获取文章数据
+	article, _ := input["article"].(map[string]interface{})
+	if article == nil {
+		article = make(map[string]interface{})
+	}
+	
+	// 获取草稿标记
+	isDraft, _ := input["is_draft"].(bool)
+	
+	// 获取元数据
+	tags := parseStringSlice(input["tags"])
+	category, _ := input["category"].(string)
+	priority := 0
+	if v, ok := input["priority"].(int); ok {
+		priority = v
+	} else if v, ok := input["priority"].(float64); ok {
+		priority = int(v)
+	}
+	
+	switch strings.ToLower(operation) {
+	case "create":
+		// 创建草稿文章
+		article["created_at"] = time.Now()
+		article["updated_at"] = time.Now()
+		article["is_draft"] = true
+		article["version"] = 1
+		article["tags"] = tags
+		article["category"] = category
+		article["priority"] = priority
+		article["edit_count"] = 0
+		
+		return map[string]interface{}{
+			"engine":    "mongodb",
+			"strategy":  "article_draft_management",
+			"operation": "create",
+			"article":   article,
+			"status":    "draft_created",
+		}, nil
+	
+	case "update":
+		// 更新草稿文章
+		article["updated_at"] = time.Now()
+		article["is_draft"] = true
+		editCount := 0
+		if v, ok := article["edit_count"].(float64); ok {
+			editCount = int(v) + 1
+		} else if v, ok := article["edit_count"].(int); ok {
+			editCount = v + 1
+		}
+		article["edit_count"] = editCount
+		if len(tags) > 0 {
+			article["tags"] = tags
+		}
+		if category != "" {
+			article["category"] = category
+		}
+		if priority > 0 {
+			article["priority"] = priority
+		}
+		
+		return map[string]interface{}{
+			"engine":    "mongodb",
+			"strategy":  "article_draft_management",
+			"operation": "update",
+			"article":   article,
+			"status":    "draft_updated",
+			"edit_count": editCount,
+		}, nil
+	
+	case "publish":
+		// 发布文章（从草稿变为已发布）
+		article["published_at"] = time.Now()
+		article["updated_at"] = time.Now()
+		article["is_draft"] = false
+		if v, ok := article["version"].(float64); ok {
+			article["version"] = int(v) + 1
+		} else if v, ok := article["version"].(int); ok {
+			article["version"] = v + 1
+		} else {
+			article["version"] = 1
+		}
+		
+		return map[string]interface{}{
+			"engine":    "mongodb",
+			"strategy":  "article_draft_management",
+			"operation": "publish",
+			"article":   article,
+			"status":    "article_published",
+		}, nil
+	
+	case "archive", "restore":
+		// 归档或恢复文章
+		article["archived_at"] = time.Now()
+		article["is_archived"] = (operation == "archive")
+		article["updated_at"] = time.Now()
+		
+		status := "article_archived"
+		if operation == "restore" {
+			article["is_archived"] = false
+			status = "article_restored"
+		}
+		
+		return map[string]interface{}{
+			"engine":    "mongodb",
+			"strategy":  "article_draft_management",
+			"operation": operation,
+			"article":   article,
+			"status":    status,
+		}, nil
+	
+	case "info":
+		// 返回文章信息和状态
+		return map[string]interface{}{
+			"engine":    "mongodb",
+			"strategy":  "article_draft_management",
+			"operation": "info",
+			"is_draft":  isDraft,
+			"article":   article,
+			"metadata": map[string]interface{}{
+				"tags":     tags,
+				"category": category,
+				"priority": priority,
+			},
+		}, nil
+
+	case "query_plan", "list_plan", "filter_plan":
+		return buildArticleDraftQueryPlan(input)
+	
+	default:
+		return nil, fmt.Errorf("mongodb article_draft_management: unsupported operation '%s'", operation)
+	}
+}
+
+func executeArticleTemplateRendering(input map[string]interface{}) (interface{}, error) {
+	// 获取模板
+	templateStr, _ := input["template"].(string)
+	presetName, _ := input["template_preset"].(string)
+	if strings.EqualFold(strings.TrimSpace(presetName), "list") {
+		return executeArticleTemplatePresetLibrary(map[string]interface{}{"operation": "list"})
+	}
+	if strings.TrimSpace(templateStr) == "" {
+		if strings.TrimSpace(presetName) == "" {
+			return nil, fmt.Errorf("mongodb article_template_rendering requires template or template_preset")
+		}
+		resolvedTemplate, err := getArticleTemplatePreset(presetName)
+		if err != nil {
+			return nil, err
+		}
+		templateStr = resolvedTemplate
+	}
+	
+	// 获取数据
+	data, _ := input["data"].(map[string]interface{})
+	if data == nil {
+		data = make(map[string]interface{})
+	}
+	
+	// 获取模板名称
+	templateName, _ := input["template_name"].(string)
+	if templateName == "" {
+		templateName = "article"
+	}
+	
+	// 获取支持功能
+	enableFunctions, _ := input["enable_functions"].(bool)
+	policy := parseArticleTemplateSecurityPolicy(input)
+	if policy.MaxTemplateSize > 0 && len([]byte(templateStr)) > policy.MaxTemplateSize {
+		return nil, fmt.Errorf("mongodb article_template_rendering: template size exceeds max_template_size=%d", policy.MaxTemplateSize)
+	}
+	
+	// 创建模板
+	tmpl := template.New(templateName)
+	if policy.StrictVariables {
+		tmpl = tmpl.Option("missingkey=error")
+	}
+
+	// 添加自定义函数（需在 Parse 前注册）
+	if enableFunctions {
+		funcMap := template.FuncMap{
+			"upper": strings.ToUpper,
+			"lower": strings.ToLower,
+			"title": strings.Title,
+			"trim":  strings.TrimSpace,
+			"len": func(s string) int {
+				return len([]rune(s))
+			},
+			"contains": strings.Contains,
+			"join":     strings.Join,
+			"split":    strings.Split,
+		}
+		allowed := policy.AllowedFunctions
+		if len(allowed) > 0 {
+			filtered := template.FuncMap{}
+			for _, name := range allowed {
+				name = strings.TrimSpace(name)
+				if fn, ok := funcMap[name]; ok {
+					filtered[name] = fn
+				}
+			}
+			funcMap = filtered
+		}
+		if len(funcMap) > 0 {
+			tmpl = tmpl.Funcs(funcMap)
+		}
+	}
+
+	parsed, err := tmpl.Parse(templateStr)
+	if err != nil {
+		return nil, fmt.Errorf("mongodb article_template_rendering: failed to parse template: %w", err)
+	}
+	
+	// 渲染模板
+	var output bytes.Buffer
+	if err := parsed.Execute(&output, data); err != nil {
+		return nil, fmt.Errorf("mongodb article_template_rendering: failed to render template: %w", err)
+	}
+	
+	renderedContent := output.String()
+	
+	// 获取文章元数据（可选）
+	article, _ := input["article"].(map[string]interface{})
+	
+	result := map[string]interface{}{
+		"engine":          "mongodb",
+		"strategy":        "article_template_rendering",
+		"template_name":   templateName,
+		"template_preset": presetName,
+		"rendered_output": renderedContent,
+		"data_used":       data,
+		"security_policy": map[string]interface{}{
+			"max_template_size": policy.MaxTemplateSize,
+			"strict_variables":  policy.StrictVariables,
+			"allowed_functions": policy.AllowedFunctions,
+		},
+	}
+	
+	if article != nil {
+		result["article_id"] = article["id"]
+		result["article_title"] = article["title"]
+	}
+	
+	return result, nil
+}
+
+func executeArticleTemplatePresetLibrary(input map[string]interface{}) (interface{}, error) {
+	operation, _ := input["operation"].(string)
+	if operation == "" {
+		operation = "list"
+	}
+	preset, _ := input["preset"].(string)
+	if preset == "" {
+		preset, _ = input["template_preset"].(string)
+	}
+
+	presets := map[string]string{
+		"blog": `# {{.title}}
+
+> 作者：{{.author}} | 发布时间：{{.published_at}}
+
+{{.summary}}
+
+{{.content}}
+
+标签：{{join .tags ", "}}`,
+		"news": `{{.title}}
+
+导语：{{.lead}}
+
+正文：
+{{.content}}
+
+记者：{{.reporter}} | 来源：{{.source}}`,
+		"knowledge_base": `## {{.title}}
+
+### 问题描述
+{{.problem}}
+
+### 解决方案
+{{.solution}}
+
+### 注意事项
+{{.notes}}`,
+	}
+
+	if strings.EqualFold(strings.TrimSpace(operation), "list") {
+		names := make([]string, 0, len(presets))
+		for name := range presets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return map[string]interface{}{
+			"engine":       "mongodb",
+			"strategy":     "article_template_preset_library",
+			"operation":    "list",
+			"preset_names": names,
+		}, nil
+	}
+
+	resolved, err := getArticleTemplatePresetWithSource(preset, presets)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"engine":        "mongodb",
+		"strategy":      "article_template_preset_library",
+		"operation":     "get",
+		"template_preset": preset,
+		"template":      resolved,
+	}, nil
+}
+
+type articleTemplateSecurityPolicy struct {
+	MaxTemplateSize int
+	StrictVariables bool
+	AllowedFunctions []string
+}
+
+func parseArticleTemplateSecurityPolicy(input map[string]interface{}) articleTemplateSecurityPolicy {
+	policy := articleTemplateSecurityPolicy{
+		MaxTemplateSize: 64 * 1024,
+		StrictVariables: false,
+	}
+
+	if v, ok := input["max_template_size"].(int); ok && v > 0 {
+		policy.MaxTemplateSize = v
+	}
+	if v, ok := input["max_template_size"].(float64); ok && int(v) > 0 {
+		policy.MaxTemplateSize = int(v)
+	}
+
+	if rawPolicy, ok := input["security_policy"].(map[string]interface{}); ok {
+		if v, ok := rawPolicy["max_template_size"].(int); ok && v > 0 {
+			policy.MaxTemplateSize = v
+		}
+		if v, ok := rawPolicy["max_template_size"].(float64); ok && int(v) > 0 {
+			policy.MaxTemplateSize = int(v)
+		}
+		if v, ok := rawPolicy["strict_variables"].(bool); ok {
+			policy.StrictVariables = v
+		}
+		policy.AllowedFunctions = parseStringSlice(rawPolicy["allowed_functions"])
+	}
+
+	if v, ok := input["strict_variables"].(bool); ok {
+		policy.StrictVariables = v
+	}
+	if allowed := parseStringSlice(input["allowed_functions"]); len(allowed) > 0 {
+		policy.AllowedFunctions = allowed
+	}
+
+	return policy
+}
+
+func getArticleTemplatePreset(preset string) (string, error) {
+	presets := map[string]string{
+		"blog": `# {{.title}}
+
+> 作者：{{.author}} | 发布时间：{{.published_at}}
+
+{{.summary}}
+
+{{.content}}
+
+标签：{{join .tags ", "}}`,
+		"news": `{{.title}}
+
+导语：{{.lead}}
+
+正文：
+{{.content}}
+
+记者：{{.reporter}} | 来源：{{.source}}`,
+		"knowledge_base": `## {{.title}}
+
+### 问题描述
+{{.problem}}
+
+### 解决方案
+{{.solution}}
+
+### 注意事项
+{{.notes}}`,
+	}
+	return getArticleTemplatePresetWithSource(preset, presets)
+}
+
+func getArticleTemplatePresetWithSource(preset string, presets map[string]string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(preset))
+	if name == "" {
+		name = "blog"
+	}
+	tpl, ok := presets[name]
+	if !ok {
+		return "", fmt.Errorf("mongodb article template preset not supported: %s", preset)
+	}
+	return tpl, nil
+}
+
+func buildArticleDraftQueryPlan(input map[string]interface{}) (interface{}, error) {
+	collection, _ := input["collection"].(string)
+	if strings.TrimSpace(collection) == "" {
+		collection = "articles"
+	}
+
+	status, _ := input["status"].(string)
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" {
+		status = "draft"
+	}
+
+	filter := map[string]interface{}{}
+	switch status {
+	case "draft", "editing":
+		filter["is_draft"] = true
+		filter["is_archived"] = map[string]interface{}{"$ne": true}
+	case "pending_publish", "review":
+		filter["is_draft"] = true
+		filter["review_status"] = "approved"
+		filter["is_archived"] = map[string]interface{}{"$ne": true}
+	case "published":
+		filter["is_draft"] = false
+		filter["published_at"] = map[string]interface{}{"$exists": true}
+		filter["is_archived"] = map[string]interface{}{"$ne": true}
+	case "archived":
+		filter["is_archived"] = true
+	case "all":
+		// no-op
+	default:
+		return nil, fmt.Errorf("mongodb article_draft_query_plan: unsupported status '%s'", status)
+	}
+
+	if category, _ := input["category"].(string); strings.TrimSpace(category) != "" {
+		filter["category"] = category
+	}
+	if authorID, _ := input["author_id"].(string); strings.TrimSpace(authorID) != "" {
+		filter["author_id"] = authorID
+	}
+
+	projection := map[string]interface{}{
+		"title":       1,
+		"author_id":   1,
+		"category":    1,
+		"is_draft":    1,
+		"is_archived": 1,
+		"updated_at":  1,
+		"published_at": 1,
+	}
+	if fields := parseStringSlice(input["fields"]); len(fields) > 0 {
+		projection = map[string]interface{}{}
+		for _, f := range fields {
+			projection[f] = 1
+		}
+	}
+
+	limit := 20
+	if v, ok := input["limit"].(int); ok && v > 0 {
+		limit = v
+	}
+	if v, ok := input["limit"].(float64); ok && int(v) > 0 {
+		limit = int(v)
+	}
+
+	skip := 0
+	if v, ok := input["skip"].(int); ok && v >= 0 {
+		skip = v
+	}
+	if v, ok := input["skip"].(float64); ok && int(v) >= 0 {
+		skip = int(v)
+	}
+
+	sortBy, _ := input["sort_by"].(string)
+	if strings.TrimSpace(sortBy) == "" {
+		sortBy = "updated_at"
+	}
+	sortOrder := -1
+	if v, ok := input["sort_order"].(int); ok && (v == 1 || v == -1) {
+		sortOrder = v
+	}
+
+	return map[string]interface{}{
+		"engine":   "mongodb",
+		"strategy": "article_draft_query_plan",
+		"status":   status,
+		"query_plan": map[string]interface{}{
+			"collection": collection,
+			"filter":     filter,
+			"projection": projection,
+			"sort": map[string]interface{}{
+				sortBy: sortOrder,
+			},
+			"limit": limit,
+			"skip":  skip,
+		},
+	}, nil
 }
 
 // MongoFactory AdapterFactory 实现

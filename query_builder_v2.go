@@ -68,8 +68,8 @@ type sqlJoinClause struct {
 	table    string
 	alias    string
 	onClause string
-	schema   Schema       // JoinWith: 目标实体 Schema（Schema 感知 JOIN，用于 IR 元数据）
-	filters  []Condition  // JoinWith: 对连接目标实体的额外过滤条件
+	schema   Schema      // JoinWith: 目标实体 Schema（Schema 感知 JOIN，用于 IR 元数据）
+	filters  []Condition // JoinWith: 对连接目标实体的额外过滤条件
 }
 
 func (qb *SQLQueryConstructor) baseTableName() string {
@@ -364,6 +364,33 @@ func (qb *SQLQueryConstructor) qualifyCondition(condition Condition) Condition {
 	}
 }
 
+func normalizeOrderFieldName(name string) string {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.Contains(trimmed, ".") {
+		parts := strings.Split(trimmed, ".")
+		trimmed = strings.TrimSpace(parts[len(parts)-1])
+	}
+	return strings.Trim(trimmed, "`\"[]")
+}
+
+func normalizeOrderDirection(direction string) string {
+	direction = strings.ToUpper(strings.TrimSpace(direction))
+	if direction != "DESC" {
+		return "ASC"
+	}
+	return "DESC"
+}
+
+func cursorComparisonCondition(field string, direction string, value interface{}) Condition {
+	if normalizeOrderDirection(direction) == "DESC" {
+		return Lt(field, value)
+	}
+	return Gt(field, value)
+}
+
 // OrderBy 排序条件
 type OrderBy struct {
 	Field     string
@@ -492,8 +519,8 @@ func NewSQLiteDialect() *SQLiteDialect {
 type SQLServerDialect struct {
 	nextParamIndex     int
 	manyToManyStrategy string
-	recursiveCTEDepth int
-	maxRecursion      int
+	recursiveCTEDepth  int
+	maxRecursion       int
 }
 
 func NewSQLServerDialect() *SQLServerDialect {
@@ -518,8 +545,8 @@ func NewSQLServerDialectWithOptions(strategy string, recursiveCTEDepth int, maxR
 	return &SQLServerDialect{
 		nextParamIndex:     1,
 		manyToManyStrategy: v,
-		recursiveCTEDepth: recursiveCTEDepth,
-		maxRecursion:      maxRecursion,
+		recursiveCTEDepth:  recursiveCTEDepth,
+		maxRecursion:       maxRecursion,
 	}
 }
 
@@ -828,10 +855,7 @@ func (qb *SQLQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor
 
 // OrderBy 排序
 func (qb *SQLQueryConstructor) OrderBy(field string, direction string) QueryConstructor {
-	direction = strings.ToUpper(direction)
-	if direction != "ASC" && direction != "DESC" {
-		direction = "ASC"
-	}
+	direction = normalizeOrderDirection(direction)
 	qb.orderBys = append(qb.orderBys, OrderBy{
 		Field:     field,
 		Direction: direction,
@@ -849,6 +873,113 @@ func (qb *SQLQueryConstructor) Limit(count int) QueryConstructor {
 func (qb *SQLQueryConstructor) Offset(count int) QueryConstructor {
 	qb.offsetVal = &count
 	return qb
+}
+
+// Page 按页设置 LIMIT/OFFSET。
+func (qb *SQLQueryConstructor) Page(page int, pageSize int) QueryConstructor {
+	normalizedPage, normalizedPageSize, offset := normalizePaginationParams(page, pageSize)
+	pkField := primaryKeyFieldNameOrDefault(qb.schema, "")
+	qb.orderBys = ensureStableOffsetOrders(qb.orderBys, pkField)
+	qb.limitVal = &normalizedPageSize
+	if normalizedPage <= 1 {
+		qb.offsetVal = nil
+		return qb
+	}
+	qb.offsetVal = &offset
+	return qb
+}
+
+// CursorPage 使用游标分页替代大 OFFSET，要求首个排序字段与游标字段一致。
+// 当排序字段不是主键时，需要同时提供 cursorPrimaryValue 作为稳定 tie-breaker。
+func (qb *SQLQueryConstructor) CursorPage(field string, direction string, cursorValue interface{}, cursorPrimaryValue interface{}, pageSize int) *SQLQueryConstructor {
+	field = strings.TrimSpace(field)
+	if field == "" {
+		qb.setBuildErr(fmt.Errorf("cursor pagination requires a sort field"))
+		return qb
+	}
+	qb.setBuildErr(qb.validateFieldReference(field, false))
+	if qb.buildErr != nil {
+		return qb
+	}
+
+	direction = normalizeOrderDirection(direction)
+	pkField := primaryKeyFieldNameOrDefault(qb.schema, "")
+	if pkField == "" {
+		qb.setBuildErr(fmt.Errorf("cursor pagination requires a primary key field"))
+		return qb
+	}
+
+	if len(qb.orderBys) > 0 && normalizeOrderFieldName(qb.orderBys[0].Field) != normalizeOrderFieldName(field) {
+		qb.setBuildErr(fmt.Errorf("cursor pagination requires the first ORDER BY field to match %q", field))
+		return qb
+	}
+
+	qOrders := buildStableCursorOrders(field, direction, pkField)
+	qb.orderBys = mergeOrderBysIfMissing(qb.orderBys, qOrders)
+
+	cursorCond, err := buildStableCursorCondition(field, direction, cursorValue, cursorPrimaryValue, pkField, true)
+	if err != nil {
+		qb.setBuildErr(err)
+		return qb
+	}
+	if cursorCond != nil {
+		qb.Where(cursorCond)
+	}
+
+	_, normalizedPageSize, _ := normalizePaginationParams(1, pageSize)
+	qb.limitVal = &normalizedPageSize
+	qb.offsetVal = nil
+	return qb
+}
+
+func (qb *SQLQueryConstructor) Paginate(builder *PaginationBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Page(1, defaultQueryPageSize)
+	}
+
+	mode := builder.Mode
+	if mode == "" {
+		mode = PaginationModeAuto
+	}
+
+	switch mode {
+	case PaginationModeCursor:
+		return qb.CursorPage(builder.CursorField, builder.CursorDirection, builder.CursorValue, builder.CursorPrimaryValue, builder.PageSize)
+	case PaginationModeOffset:
+		return qb.Page(builder.Page, builder.PageSize)
+	default:
+		if strings.TrimSpace(builder.CursorField) != "" {
+			return qb.CursorPage(builder.CursorField, builder.CursorDirection, builder.CursorValue, builder.CursorPrimaryValue, builder.PageSize)
+		}
+		return qb.Page(builder.Page, builder.PageSize)
+	}
+}
+
+func (qb *SQLQueryConstructor) buildCountConstructor() QueryConstructor {
+	clone := &SQLQueryConstructor{
+		schema:             qb.schema,
+		dialect:            qb.dialect,
+		compiler:           qb.compiler,
+		selectedCols:       append([]string(nil), qb.selectedCols...),
+		conditions:         append([]Condition(nil), qb.conditions...),
+		orderBys:           append([]OrderBy(nil), qb.orderBys...),
+		fromAlias:          qb.fromAlias,
+		joins:              append([]sqlJoinClause(nil), qb.joins...),
+		crossTableStrategy: qb.crossTableStrategy,
+		customQueryMode:    qb.customQueryMode,
+		buildErr:           qb.buildErr,
+		viewRegistry:       qb.viewRegistry,
+	}
+	if qb.countExpr != nil {
+		expr := *qb.countExpr
+		clone.countExpr = &expr
+		clone.limitVal = nil
+		clone.offsetVal = nil
+		clone.orderBys = nil
+		return clone
+	}
+	clone.Count()
+	return clone
 }
 
 // Build 构建 SQL 查询

@@ -38,10 +38,10 @@ type QueryJoinIR struct {
 	Semantic JoinSemantic // 语义意图（来自 JoinBuilder.semantic）；"" 表示 raw Join 或未设置
 	Relation *QueryJoinRelationIR
 	Table    string
-	Schema   Schema       // Schema 引用，来自 JoinBuilder，nil 表示 raw string JOIN
+	Schema   Schema // Schema 引用，来自 JoinBuilder，nil 表示 raw string JOIN
 	Alias    string
 	OnClause string
-	Filters  []Condition  // 对连接目标实体的额外过滤条件（各后端自行处理）
+	Filters  []Condition // 对连接目标实体的额外过滤条件（各后端自行处理）
 }
 
 // QueryJoinRelationIR 关系元数据（用于适配器优化）。

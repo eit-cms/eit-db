@@ -9,6 +9,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/microsoft/go-mssqldb v1.8.2
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.3
+	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/cobra v1.10.2
 	go.mongodb.org/mongo-driver v1.14.0
 	gopkg.in/yaml.v3 v3.0.1

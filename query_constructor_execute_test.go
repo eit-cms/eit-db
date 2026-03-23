@@ -228,6 +228,250 @@ func TestExecuteQueryConstructorAutoSQLiteQuery(t *testing.T) {
 	}
 }
 
+func TestExecuteQueryConstructorPagedWithCacheSQLite(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-qc-paged-cache.db"),
+		},
+		QueryCache: &QueryCacheConfig{MaxEntries: 16, DefaultTTLSeconds: 60, EnableMetrics: true},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+	if _, err := repo.Exec(ctx, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'cindy'), (4, 'david'), (5, 'ellen')"); err != nil {
+		t.Fatalf("insert seed data failed: %v", err)
+	}
+
+	schema := NewBaseSchema("users")
+	qc1, err := repo.NewQueryConstructor(schema)
+	if err != nil {
+		t.Fatalf("new query constructor failed: %v", err)
+	}
+	qc1.Select("id", "name").OrderBy("id", "ASC")
+
+	result1, err := repo.ExecuteQueryConstructorPagedWithCache(ctx, "users:list", qc1, 2, 2)
+	if err != nil {
+		t.Fatalf("first paged execute failed: %v", err)
+	}
+	if result1.QueryCacheHit || result1.CountCacheHit {
+		t.Fatalf("expected first paged execution to miss cache, got query=%v count=%v", result1.QueryCacheHit, result1.CountCacheHit)
+	}
+	if result1.Total != 5 || result1.TotalPages != 3 {
+		t.Fatalf("unexpected total metadata: %+v", result1)
+	}
+	if len(result1.Rows) != 2 {
+		t.Fatalf("expected 2 rows on page 2, got %d", len(result1.Rows))
+	}
+	if result1.Rows[0]["name"] != "cindy" || result1.Rows[1]["name"] != "david" {
+		t.Fatalf("unexpected paged rows: %+v", result1.Rows)
+	}
+	if !result1.HasNext || !result1.HasPrevious {
+		t.Fatalf("expected page 2 to have both previous and next pages, got %+v", result1)
+	}
+
+	qc2, err := repo.NewQueryConstructor(schema)
+	if err != nil {
+		t.Fatalf("new query constructor failed: %v", err)
+	}
+	qc2.Select("id", "name").OrderBy("id", "ASC")
+
+	result2, err := repo.ExecuteQueryConstructorPagedWithCache(ctx, "users:list", qc2, 2, 2)
+	if err != nil {
+		t.Fatalf("second paged execute failed: %v", err)
+	}
+	if !result2.QueryCacheHit || !result2.CountCacheHit {
+		t.Fatalf("expected second paged execution cache hits, got query=%v count=%v", result2.QueryCacheHit, result2.CountCacheHit)
+	}
+	if result2.Offset != 2 || result2.Page != 2 || result2.PageSize != 2 {
+		t.Fatalf("unexpected pagination coordinates: %+v", result2)
+	}
+	if result2.Statement == "" {
+		t.Fatalf("expected compiled statement to be returned")
+	}
+}
+
+func TestExecuteQueryConstructorPagedSQLite(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-qc-paged.db"),
+		},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+	if _, err := repo.Exec(ctx, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'cindy')"); err != nil {
+		t.Fatalf("insert seed data failed: %v", err)
+	}
+
+	schema := NewBaseSchema("users")
+	qc, err := repo.NewQueryConstructor(schema)
+	if err != nil {
+		t.Fatalf("new query constructor failed: %v", err)
+	}
+	qc.Select("id", "name").OrderBy("id", "ASC")
+
+	result, err := repo.ExecuteQueryConstructorPaged(ctx, qc, 1, 2)
+	if err != nil {
+		t.Fatalf("paged execute failed: %v", err)
+	}
+	if result.QueryCacheHit || result.CountCacheHit {
+		t.Fatalf("expected no cache hits for non-cached pagination, got %+v", result)
+	}
+	if result.Total != 3 || result.TotalPages != 2 {
+		t.Fatalf("unexpected pagination totals: %+v", result)
+	}
+	if result.HasPrevious || !result.HasNext {
+		t.Fatalf("unexpected navigation flags: %+v", result)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected first page to contain 2 rows, got %d", len(result.Rows))
+	}
+}
+
+func TestExecuteQueryConstructorPaginatedOffsetBuilderSQLite(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-qc-paginated-builder-offset.db"),
+		},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+	if _, err := repo.Exec(ctx, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob'), (3, 'cindy'), (4, 'david')"); err != nil {
+		t.Fatalf("insert seed data failed: %v", err)
+	}
+
+	schema := NewBaseSchema("users")
+	qc, err := repo.NewQueryConstructor(schema)
+	if err != nil {
+		t.Fatalf("new query constructor failed: %v", err)
+	}
+	qc.Select("id", "name").OrderBy("id", "ASC")
+
+	builder := NewPaginationBuilder(2, 2).OffsetOnly()
+	result, err := repo.ExecuteQueryConstructorPaginated(ctx, qc, builder)
+	if err != nil {
+		t.Fatalf("paginated execute failed: %v", err)
+	}
+	if result.Page != 2 || result.PageSize != 2 || result.Offset != 2 {
+		t.Fatalf("unexpected pagination metadata: %+v", result)
+	}
+	if result.Total != 4 || result.TotalPages != 2 {
+		t.Fatalf("unexpected total metadata: %+v", result)
+	}
+	if len(result.Rows) != 2 || result.Rows[0]["name"] != "cindy" || result.Rows[1]["name"] != "david" {
+		t.Fatalf("unexpected rows: %+v", result.Rows)
+	}
+}
+
+func TestExecuteQueryConstructorPaginatedCursorBuilderSQLite(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-qc-paginated-builder-cursor.db"),
+		},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+	if _, err := repo.Exec(ctx, "INSERT INTO users (id, created_at, name) VALUES (1, '2026-03-21T10:00:00Z', 'alice'), (2, '2026-03-21T10:00:00Z', 'bob'), (3, '2026-03-21T10:00:00Z', 'cindy'), (4, '2026-03-21T11:00:00Z', 'david')"); err != nil {
+		t.Fatalf("insert seed data failed: %v", err)
+	}
+
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeString).Build())
+	schema.AddField(NewField("name", TypeString).Build())
+
+	qc := NewSQLQueryConstructor(schema, NewSQLiteDialect())
+	qc.Select("id", "name", "created_at")
+
+	builder := NewCursorPaginationBuilder("created_at", "ASC", "2026-03-21T10:00:00Z", 1, 2)
+	result, err := repo.ExecuteQueryConstructorPaginated(ctx, qc, builder)
+	if err != nil {
+		t.Fatalf("cursor paginated execute failed: %v", err)
+	}
+	if result.Page != 1 || result.Offset != 0 || result.PageSize != 2 {
+		t.Fatalf("unexpected cursor pagination metadata: %+v", result)
+	}
+	if len(result.Rows) != 2 || result.Rows[0]["name"] != "bob" || result.Rows[1]["name"] != "cindy" {
+		t.Fatalf("unexpected cursor rows: %+v", result.Rows)
+	}
+}
+
+func TestSQLQueryConstructorCursorPageSQLite(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-qc-cursor.db"),
+		},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+	if _, err := repo.Exec(ctx, "INSERT INTO users (id, created_at, name) VALUES (1, '2026-03-21T10:00:00Z', 'alice'), (2, '2026-03-21T10:00:00Z', 'bob'), (3, '2026-03-21T10:00:00Z', 'cindy'), (4, '2026-03-21T11:00:00Z', 'david')"); err != nil {
+		t.Fatalf("insert seed data failed: %v", err)
+	}
+
+	schema := NewBaseSchema("users")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeString).Build())
+	schema.AddField(NewField("name", TypeString).Build())
+
+	qc := NewSQLQueryConstructor(schema, NewSQLiteDialect())
+	qc.Select("id", "name", "created_at")
+	qc.CursorPage("created_at", "ASC", "2026-03-21T10:00:00Z", 1, 2)
+
+	result, err := repo.ExecuteQueryConstructor(ctx, qc)
+	if err != nil {
+		t.Fatalf("execute cursor page failed: %v", err)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 cursor rows, got %d", len(result.Rows))
+	}
+	if result.Rows[0]["name"] != "bob" || result.Rows[1]["name"] != "cindy" {
+		t.Fatalf("unexpected cursor rows: %+v", result.Rows)
+	}
+}
+
 func TestExecuteQueryConstructorAutoSQLiteExec(t *testing.T) {
 	cfg := &Config{
 		Adapter: "sqlite",
@@ -342,7 +586,7 @@ func (s *staticQueryConstructor) WhereAll(conditions ...Condition) QueryConstruc
 func (s *staticQueryConstructor) WhereAny(conditions ...Condition) QueryConstructor {
 	return s
 }
-func (s *staticQueryConstructor) Select(fields ...string) QueryConstructor { return s }
+func (s *staticQueryConstructor) Select(fields ...string) QueryConstructor   { return s }
 func (s *staticQueryConstructor) Count(fieldName ...string) QueryConstructor { return s }
 func (s *staticQueryConstructor) CountWith(builder *CountBuilder) QueryConstructor {
 	return s
@@ -352,6 +596,12 @@ func (s *staticQueryConstructor) OrderBy(field string, direction string) QueryCo
 }
 func (s *staticQueryConstructor) Limit(count int) QueryConstructor  { return s }
 func (s *staticQueryConstructor) Offset(count int) QueryConstructor { return s }
+func (s *staticQueryConstructor) Page(page int, pageSize int) QueryConstructor {
+	return s
+}
+func (s *staticQueryConstructor) Paginate(builder *PaginationBuilder) QueryConstructor {
+	return s
+}
 func (s *staticQueryConstructor) FromAlias(alias string) QueryConstructor {
 	return s
 }
@@ -371,7 +621,7 @@ func (s *staticQueryConstructor) CrossTableStrategy(strategy CrossTableStrategy)
 	return s
 }
 func (s *staticQueryConstructor) JoinWith(builder *JoinBuilder) QueryConstructor { return s }
-func (s *staticQueryConstructor) CustomMode() QueryConstructor { return s }
+func (s *staticQueryConstructor) CustomMode() QueryConstructor                   { return s }
 func (s *staticQueryConstructor) Build(ctx context.Context) (string, []interface{}, error) {
 	return s.query, copyQueryArgs(s.args), nil
 }

@@ -175,6 +175,221 @@ func TestNeo4jCustomFeatureBidirectionalRelationshipSemantics(t *testing.T) {
 	}
 }
 
+func TestNeo4jCustomFeatureSocialBidirectionalFollowModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_model_bidirectional_follow", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "bidirectional_follow" {
+		t.Fatalf("expected bidirectional_follow preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["mutual_followers"], "[:FOLLOWS]") {
+		t.Fatalf("expected mutual followers query using FOLLOWS, got: %s", queries["mutual_followers"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialForumPostModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_network_preset_model", map[string]interface{}{"preset": "forum_post"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "forum_post" {
+		t.Fatalf("expected forum_post preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["create_post"], "POSTED_IN") || !strings.Contains(queries["like_post"], "LIKES_POST") {
+		t.Fatalf("expected forum model queries, got create_post=%s like_post=%s", queries["create_post"], queries["like_post"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialOneToOneChatModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_model_one_to_one_chat", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "one_to_one_chat" {
+		t.Fatalf("expected one_to_one_chat preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["send_direct_message"], "ChatMessage") || !strings.Contains(queries["send_direct_message"], "[:SENT]") || !strings.Contains(queries["send_direct_message"], "[:TO]") {
+		t.Fatalf("expected direct message middle-node model query, got: %s", queries["send_direct_message"])
+	}
+	if !strings.Contains(queries["can_chat_check"], "FOLLOWS") || !strings.Contains(queries["can_chat_check"], "FRIEND") {
+		t.Fatalf("expected can_chat_check to include FRIEND and FOLLOWS semantics, got: %s", queries["can_chat_check"])
+	}
+	constraints, ok := payload["constraints"].([]string)
+	if !ok {
+		t.Fatalf("expected constraints list, got %T", payload["constraints"])
+	}
+	if len(constraints) == 0 || !strings.Contains(strings.Join(constraints, "\n"), "CREATE FULLTEXT INDEX chat_message_fulltext") {
+		t.Fatalf("expected chat message fulltext index in constraints, got %+v", constraints)
+	}
+	if !strings.Contains(queries["search_direct_messages"], "db.index.fulltext.queryNodes('chat_message_fulltext'") {
+		t.Fatalf("expected direct message fulltext search query, got: %s", queries["search_direct_messages"])
+	}
+	if !strings.Contains(queries["search_direct_messages_advanced"], "node.deleted_at IS NULL") || !strings.Contains(queries["search_direct_messages_advanced"], "$start_at") || !strings.Contains(queries["search_direct_messages_advanced"], "mention_boost") {
+		t.Fatalf("expected advanced direct search to include soft-delete/time-window/mention boost semantics, got: %s", queries["search_direct_messages_advanced"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialGroupChatRoomModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_network_preset_model", map[string]interface{}{"preset": "group_chat_room"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "group_chat_room" {
+		t.Fatalf("expected group_chat_room preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["create_room"], "coalesce($name, coalesce(room.name, 'room'))") {
+		t.Fatalf("expected create_room to include default room name behavior, got: %s", queries["create_room"])
+	}
+	if !strings.Contains(queries["send_room_message"], "-[in1:IN]->(room") || !strings.Contains(queries["send_room_message"], "-[in2:IN]->(u)") {
+		t.Fatalf("expected send_room_message to require bidirectional IN membership, got: %s", queries["send_room_message"])
+	}
+	if !strings.Contains(queries["at_user"], "[:AT]") || !strings.Contains(queries["ref_message"], "[:REF]") {
+		t.Fatalf("expected @ and ref relationship queries, got at_user=%s ref_message=%s", queries["at_user"], queries["ref_message"])
+	}
+	constraints, ok := payload["constraints"].([]string)
+	if !ok {
+		t.Fatalf("expected constraints list, got %T", payload["constraints"])
+	}
+	if len(constraints) == 0 || !strings.Contains(strings.Join(constraints, "\n"), "CREATE FULLTEXT INDEX chat_message_fulltext") {
+		t.Fatalf("expected chat message fulltext index in constraints, got %+v", constraints)
+	}
+	if !strings.Contains(queries["search_room_messages"], "db.index.fulltext.queryNodes('chat_message_fulltext'") {
+		t.Fatalf("expected room message fulltext search query, got: %s", queries["search_room_messages"])
+	}
+	if !strings.Contains(queries["search_room_messages_advanced"], "node.deleted_at IS NULL") || !strings.Contains(queries["search_room_messages_advanced"], "$start_at") || !strings.Contains(queries["search_room_messages_advanced"], "mention_boost") {
+		t.Fatalf("expected advanced room search to include soft-delete/time-window/mention boost semantics, got: %s", queries["search_room_messages_advanced"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialChatReceiptModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_model_chat_receipt", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "chat_receipt" {
+		t.Fatalf("expected chat_receipt preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["mark_direct_message_read"], "READ_BY") || !strings.Contains(queries["mark_room_message_read"], "READ_BY") {
+		t.Fatalf("expected READ_BY semantics in receipt queries, got direct=%s room=%s", queries["mark_direct_message_read"], queries["mark_room_message_read"])
+	}
+	if !strings.Contains(queries["list_room_unread"], "NOT (u)-[:READ_BY]->(m)") {
+		t.Fatalf("expected unread query using READ_BY anti-pattern, got: %s", queries["list_room_unread"])
+	}
+	constraints, ok := payload["constraints"].([]string)
+	if !ok {
+		t.Fatalf("expected constraints list, got %T", payload["constraints"])
+	}
+	if len(constraints) == 0 || !strings.Contains(strings.Join(constraints, "\n"), "CREATE FULLTEXT INDEX chat_message_fulltext") {
+		t.Fatalf("expected chat message fulltext index in constraints, got %+v", constraints)
+	}
+}
+
+func TestNeo4jCustomFeatureSocialChatModerationModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_network_preset_model", map[string]interface{}{"preset": "chat_moderation"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "chat_moderation" {
+		t.Fatalf("expected chat_moderation preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["mute_member"], "MUTED_IN") || !strings.Contains(queries["ban_member"], "BANNED_IN") {
+		t.Fatalf("expected MUTED_IN/BANNED_IN moderation queries, got mute=%s ban=%s", queries["mute_member"], queries["ban_member"])
+	}
+	if !strings.Contains(queries["can_send_room_message"], "AS can_send") || !strings.Contains(queries["can_send_room_message"], "BANNED_IN") {
+		t.Fatalf("expected can_send guard query for safe API gating, got: %s", queries["can_send_room_message"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialMessageEmojiModel(t *testing.T) {
+	a := &Neo4jAdapter{}
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_model_message_emoji", map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["preset"] != "message_emoji" {
+		t.Fatalf("expected message_emoji preset, got %v", payload["preset"])
+	}
+	queries, ok := payload["queries"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected queries map, got %T", payload["queries"])
+	}
+	if !strings.Contains(queries["attach_emoji_to_message"], "(e)-[r:INCLUDED_BY {index: $index}]->(m)") {
+		t.Fatalf("expected INCLUDED_BY relation from emoji to message with index field, got: %s", queries["attach_emoji_to_message"])
+	}
+	if !strings.Contains(queries["render_message_emoji_payload"], "template_content") || !strings.Contains(queries["render_message_emoji_payload"], "collect({index: r.index") {
+		t.Fatalf("expected emoji render payload query with indexed placeholder mapping, got: %s", queries["render_message_emoji_payload"])
+	}
+	if !strings.Contains(queries["list_message_emojis"], "(e:Emoji)-[r:INCLUDED_BY]->(m:ChatMessage") {
+		t.Fatalf("expected list_message_emojis to traverse from static Emoji node to message, got: %s", queries["list_message_emojis"])
+	}
+	constraints, ok := payload["constraints"].([]string)
+	if !ok || len(constraints) == 0 {
+		t.Fatalf("expected constraints list, got %+v", payload["constraints"])
+	}
+	if !strings.Contains(strings.Join(constraints, "\n"), "emoji_id_unique") {
+		t.Fatalf("expected emoji constraints, got %+v", constraints)
+	}
+}
+
 func TestNeo4jQueryBuilderProvider(t *testing.T) {
 	a := &Neo4jAdapter{}
 	p := a.GetQueryBuilderProvider()
@@ -227,6 +442,56 @@ func TestNeo4jQueryBuilderBuildBasicCypher(t *testing.T) {
 	}
 	if args[0] != "alice" || args[1] != 18 {
 		t.Fatalf("unexpected args: %v", args)
+	}
+}
+
+func TestNeo4jQueryBuilderPaginateCursorMode(t *testing.T) {
+	schema := NewBaseSchema("User")
+	q := NewNeo4jQueryConstructor(schema).
+		FromAlias("u").
+		Select("u").
+		Paginate(NewPaginationBuilder(1, 3).CursorBy("created_at", "DESC", "2026-03-21T10:00:00Z", nil))
+
+	cypher, args, err := q.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(cypher, "WHERE") || !strings.Contains(cypher, "u.created_at < $p1") {
+		t.Fatalf("expected cursor predicate in cypher, got: %s", cypher)
+	}
+	if !strings.Contains(cypher, "ORDER BY u.created_at DESC") {
+		t.Fatalf("expected cursor sort in cypher, got: %s", cypher)
+	}
+	if !strings.Contains(cypher, "LIMIT 3") || strings.Contains(cypher, "SKIP") {
+		t.Fatalf("expected cursor pagination to use LIMIT without SKIP, got: %s", cypher)
+	}
+	if len(args) != 1 || args[0] != "2026-03-21T10:00:00Z" {
+		t.Fatalf("unexpected cursor args: %v", args)
+	}
+}
+
+func TestNeo4jQueryBuilderPaginateCursorModeWithPrimaryTieBreaker(t *testing.T) {
+	schema := NewBaseSchema("User")
+	schema.AddField(NewField("id", TypeInteger).PrimaryKey().Build())
+	schema.AddField(NewField("created_at", TypeString).Build())
+
+	q := NewNeo4jQueryConstructor(schema).
+		FromAlias("u").
+		Select("u").
+		Paginate(NewPaginationBuilder(1, 3).CursorBy("created_at", "ASC", "2026-03-21T10:00:00Z", 12))
+
+	cypher, args, err := q.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	if !strings.Contains(cypher, "(u.created_at > $p1 OR (u.created_at = $p2 AND u.id > $p3))") {
+		t.Fatalf("expected cursor OR tie-breaker predicate, got: %s", cypher)
+	}
+	if !strings.Contains(cypher, "ORDER BY u.created_at ASC, u.id ASC") {
+		t.Fatalf("expected stable cursor sort by created_at then id, got: %s", cypher)
+	}
+	if len(args) != 3 || args[0] != "2026-03-21T10:00:00Z" || args[1] != "2026-03-21T10:00:00Z" || args[2] != 12 {
+		t.Fatalf("unexpected tie-breaker args: %v", args)
 	}
 }
 
@@ -603,5 +868,76 @@ func TestRepositoryCypherHelpersRequireNeo4jAdapter(t *testing.T) {
 	}
 	if _, err := repo.ExecCypher(context.Background(), "CREATE (n:X)", nil); err == nil {
 		t.Fatalf("expected non-neo4j adapter error for ExecCypher")
+	}
+}
+
+func TestNeo4jCustomFeatureSocialModelExecutor(t *testing.T) {
+	a := &Neo4jAdapter{}
+	// 测试不执行实际操作的模式（无数据库连接）
+	out, err := a.ExecuteCustomFeature(context.Background(), "social_model_executor", map[string]interface{}{
+		"preset":  "bidirectional_follow",
+		"execute": false,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	payload, ok := out.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map payload, got %T", out)
+	}
+	if payload["strategy"] != "social_model_executor" {
+		t.Fatalf("expected social_model_executor strategy, got %v", payload["strategy"])
+	}
+	if payload["preset"] != "bidirectional_follow" {
+		t.Fatalf("expected bidirectional_follow preset, got %v", payload["preset"])
+	}
+	
+	// 验证constraints存在
+	constraints, ok := payload["constraints"].([]string)
+	if !ok || len(constraints) == 0 {
+		t.Fatalf("expected non-empty constraints, got %+v", payload["constraints"])
+	}
+	
+	// 验证sample_rules存在
+	rules, ok := payload["sample_rules"].(map[string]string)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("expected non-empty sample_rules, got %+v", payload["sample_rules"])
+	}
+	
+	// 当execute=false时，不应有execution_results
+	if _, ok := payload["execution_results"]; ok {
+		t.Fatalf("expected no execution_results when execute=false, got %+v", payload["execution_results"])
+	}
+}
+
+func TestNeo4jCustomFeatureSocialModelExecutorAllPresets(t *testing.T) {
+	a := &Neo4jAdapter{}
+	presets := []string{"bidirectional_follow", "friendship", "forum_post", "one_to_one_chat", "group_chat_room", "chat_receipt", "chat_moderation", "message_emoji"}
+	
+	for _, preset := range presets {
+		out, err := a.ExecuteCustomFeature(context.Background(), "social_model_executor", map[string]interface{}{
+			"preset":  preset,
+			"execute": false,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error for preset %s: %v", preset, err)
+		}
+		payload, ok := out.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected map payload for preset %s, got %T", preset, out)
+		}
+		if payload["preset"] != preset {
+			t.Fatalf("expected preset %s, got %v", preset, payload["preset"])
+		}
+		
+		// 验证constraints和rules
+		constraints, ok := payload["constraints"].([]string)
+		if !ok || len(constraints) == 0 {
+			t.Fatalf("expected non-empty constraints for preset %s, got %+v", preset, payload["constraints"])
+		}
+		rules, ok := payload["sample_rules"].(map[string]string)
+		if !ok || len(rules) == 0 {
+			t.Fatalf("expected non-empty sample_rules for preset %s, got %+v", preset, payload["sample_rules"])
+		}
 	}
 }

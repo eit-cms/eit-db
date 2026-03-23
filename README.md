@@ -21,9 +21,9 @@
 go get github.com/eit-cms/eit-db
 ```
 
-### v1.1.0 - 关系语义与多后端策略升级 (2026-03-20)
+### v1.1.1 - NoSQL 特色能力增强与任务调度优化 (2026-03-23)
 
-**核心变化**：引入显式关系语义注册与适配器策略化执行，增强多后端协同能力
+**核心变化**：优化跨适配器任务调度与回退策略，补齐 MongoDB/Neo4j 的可复用特色能力，减少应用层重复实现
 ## 🧪 选型决策树（30 秒）
 
 按下面问题快速判断是否适合使用 EIT-DB：
@@ -294,6 +294,8 @@ Neo4j 在 EIT-DB 中将“外键能力”按关系语义建模：
 - 不是 SQL FK 约束，但通过关系边表达关联，语义通常更强。
 - 关系可携带属性（payload），可直接承载业务状态与元数据。
 - 支持双向关系语义转换（例如好友请求从单向到双向）。
+- 提供社交聊天预设模型：一对一聊天（双向关系可聊）与多人聊天室（双向 IN 可发言）。
+- 提供已读回执和聊天治理预设：`READ_BY` / `MUTED_IN` / `BANNED_IN`。
 
 ### 1) 关系关联查询（无中间表）
 
@@ -333,6 +335,141 @@ result, err := repo.ExecuteFeature(ctx, "bidirectional_relationship_semantics", 
 ```
 
 说明：该能力默认将单向请求关系（KNOWS_REQUEST）转换为双向好友关系（KNOWS），用于“接受好友请求”这类常见社交语义。
+
+### 4) 社交聊天预设模型（新增）
+
+```go
+// 一对一聊天：仅双向 FRIEND 或双向 FOLLOWS 可发送消息
+dmModel, err := repo.ExecuteFeature(ctx, "social_model_one_to_one_chat", "", map[string]interface{}{})
+if err != nil {
+    panic(err)
+}
+
+// 多人聊天室：ChatRoom 单元 + 双向 IN 发言权限 + 单向 IN 入群申请
+roomModel, err := repo.ExecuteFeature(ctx, "social_network_preset_model", "", map[string]interface{}{
+    "preset": "group_chat_room",
+})
+if err != nil {
+    panic(err)
+}
+
+_ = dmModel
+_ = roomModel
+```
+
+说明：
+
+1. 私聊消息采用中间节点 `ChatMessage`，关系为 `SENT -> TO`。
+2. 群聊支持 `AT` 关系提及用户、`REF` 关系引用历史消息。
+3. 聊天消息默认包含 `chat_message_fulltext`（`ChatMessage.content`）全文索引。
+4. 检索模板支持时间窗口、软删除过滤、@ 命中加权。
+5. 已读回执使用 `READ_BY`，治理策略使用 `MUTED_IN` / `BANNED_IN`。
+6. 支持 Emoji 嵌入关系：`(:Emoji)-[:INCLUDED_BY {index}]->(:ChatMessage)` 对应消息中的 `{{0}}` 占位符，Emoji 作为静态节点可复用。
+7. 详细查询模板见 [docs/adapters/NEO4J.md](docs/adapters/NEO4J.md)。
+
+### 5) 为什么这类能力适合放在图数据库数据层
+
+1. 把复杂关系规则（双向关系可聊、双向 IN 可发言、禁言/封禁）直接表达在图关系里，避免应用层重复实现。
+2. API 可以只暴露有限、安全的业务入口，权限判定通过图查询模板统一执行。
+3. 当关系模型迭代时，新增关系类型即可扩展能力，减少多服务联改和越权漏洞风险。
+
+## 📝 MongoDB 文档编辑与渲染特性（新增）
+
+MongoDB 在文档类业务（CMS/知识库/公告）中，常见需求是“草稿状态流转 + 模板渲染输出”。
+EIT-DB 在 Adapter 层提供这组能力，目的不是替代业务层，而是把高频且重复的文档处理逻辑标准化：
+
+1. 草稿状态语义统一：create/update/publish/archive/restore/query_plan。
+2. 模板渲染入口统一：支持 Go 标准模板、预设模板库和安全策略。
+3. 查询计划结构统一：便于 API 层、后台任务、运营脚本复用同一过滤约定。
+
+### 快速使用
+
+```go
+// 1) 草稿管理
+draftOut, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_draft_management", map[string]interface{}{
+    "operation": "create",
+    "article": map[string]interface{}{
+        "title": "Draft Title",
+        "content": "Draft content",
+    },
+    "tags": []string{"cms", "mongodb"},
+    "category": "tech",
+})
+if err != nil {
+    panic(err)
+}
+
+// 2) 查询计划
+planOut, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_draft_query_plan", map[string]interface{}{
+    "status": "published",
+    "limit":  20,
+    "skip":   0,
+})
+if err != nil {
+    panic(err)
+}
+
+// 3) 使用预设模板渲染
+renderOut, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_template_rendering", map[string]interface{}{
+    "template_preset": "news",
+    "data": map[string]interface{}{
+        "title": "Weekly Digest",
+        "lead":  "Highlights",
+        "content": "...",
+        "reporter": "Team",
+        "source": "Internal",
+    },
+    "strict_variables": true,
+    "max_template_size": 4096,
+})
+if err != nil {
+    panic(err)
+}
+
+_ = draftOut
+_ = planOut
+_ = renderOut
+```
+
+### REST API 映射建议
+
+下面是推荐的后端路由映射，目标是让前后端在草稿流转、筛选列表和模板渲染上使用同一套语义。
+
+| 场景 | 推荐路由 | 对应特性 |
+|---|---|---|
+| 创建/更新草稿 | POST /api/articles/draft | article_draft_management |
+| 发布草稿 | POST /api/articles/publish | article_draft_management |
+| 归档/恢复 | POST /api/articles/archive 或 /restore | article_draft_management |
+| 文章列表查询计划 | POST /api/articles/query-plan | article_draft_query_plan |
+| 模板列表 | GET /api/articles/templates/presets | article_template_preset_library |
+| 模板渲染 | POST /api/articles/render | article_template_rendering |
+
+请求示例（模板渲染）：
+
+```json
+{
+    "template_preset": "news",
+    "template_name": "news_card",
+    "strict_variables": true,
+    "max_template_size": 4096,
+    "allowed_functions": ["trim", "upper", "join"],
+    "data": {
+        "title": "Weekly Digest",
+        "lead": "Highlights",
+        "content": "...",
+        "reporter": "Team",
+        "source": "Internal"
+    }
+}
+```
+
+响应建议：
+
+1. 固定返回 strategy 字段，前端可据此区分渲染模式或列表模式。
+2. 保留 query_plan 原样下发，便于后端网关或任务系统复用。
+3. 透传 security_policy 到响应中，方便前端调试模板配置。
+
+详细参数、预设模板和安全策略建议见：[docs/adapters/MONGODB.md](docs/adapters/MONGODB.md)。
 
 ### 1. 配置数据库连接
 
@@ -1102,6 +1239,7 @@ func NewMigration_20260203160000_AddIndexes() db.MigrationInterface {
 ## 📖 文档
 
 - [架构总览](docs/ARCHITECTURE.md) - 当前架构与路线图目标对齐说明
+- [v1.1.1 Release Notes](docs/RELEASE_NOTES_v1_1.md) - 小版本优化与 NoSQL 特色能力发布说明
 - [v1.1 路线图](docs/V1_1_ROADMAP.md) - 迁移入口统一与 MongoDB/Neo4j 迁移接入目标
 - [v1.1 升级指南（Schema/Query Builder）](docs/MIGRATION_GUIDE_v1_1.md) - Schema 关系注册与 Query Builder API 迁移说明
 - [v1.1 迁移工具说明](docs/MIGRATION_TOOL_GUIDE_v1_1.md) - Schema/RawSQL 双入口策略与使用规范
@@ -1199,6 +1337,16 @@ go test -bench=. -benchmem
 ```
 
 ## 📊 版本更新
+
+### v1.1.1 - NoSQL 特色能力增强与任务调度优化 (2026-03-23)
+
+**核心里程碑**：补齐可直接复用的 NoSQL 特色能力模板，让应用层从“重复造轮子”转向“组合调用”
+
+- ✅ 定时任务覆盖策略升级：适配器不支持原生任务时，Repository 层可回退到统一调度器（默认开启，可配置关闭）
+- ✅ MongoDB 新增日志与文档工作流特色能力：热词分析、规则分词、草稿管理、模板渲染与模板库
+- ✅ Neo4j 社交/聊天预置模型增强：一对一聊天、群聊、已读回执、禁言/封禁、消息全文检索
+- ✅ 表情语义模型改进：静态 Emoji 节点可复用，使用 `INCLUDED_BY(index)` 与消息占位符绑定
+- ✅ 文档与测试完善：README + 适配器文档同步更新，回归测试通过
 
 ### v1.1.0 - 关系语义与多后端策略升级 (2026-03-20)
 
@@ -1371,5 +1519,5 @@ MIT License
 
 ---
 
-**最后更新**：2026-03-20  
-**当前版本**：v1.1.0（Minor 发布）
+**最后更新**：2026-03-23  
+**当前版本**：v1.1.1（Patch 发布）

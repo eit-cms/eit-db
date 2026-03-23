@@ -30,8 +30,8 @@ type cypherJoinClause struct {
 	table    string
 	alias    string
 	onClause string
-	schema   Schema       // JoinWith: 目标实体 Schema，nil 表示 raw string JOIN
-	filters  []Condition  // JoinWith: 对连接节点的额外过滤条件
+	schema   Schema      // JoinWith: 目标实体 Schema，nil 表示 raw string JOIN
+	filters  []Condition // JoinWith: 对连接节点的额外过滤条件
 }
 
 // CypherCompiler 将 QueryIR 编译为 Cypher。
@@ -220,6 +220,49 @@ func (qb *Neo4jQueryConstructor) Limit(count int) QueryConstructor {
 func (qb *Neo4jQueryConstructor) Offset(count int) QueryConstructor {
 	qb.offsetVal = &count
 	return qb
+}
+
+func (qb *Neo4jQueryConstructor) Page(page int, pageSize int) QueryConstructor {
+	_, normalizedPageSize, offset := normalizePaginationParams(page, pageSize)
+	qb.limitVal = &normalizedPageSize
+	if offset <= 0 {
+		qb.offsetVal = nil
+		return qb
+	}
+	qb.offsetVal = &offset
+	return qb
+}
+
+func (qb *Neo4jQueryConstructor) Paginate(builder *PaginationBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Page(1, defaultQueryPageSize)
+	}
+
+	mode := builder.Mode
+	if mode == "" {
+		mode = PaginationModeAuto
+	}
+
+	if mode == PaginationModeCursor || (mode == PaginationModeAuto && strings.TrimSpace(builder.CursorField) != "") {
+		field := strings.TrimSpace(builder.CursorField)
+		if field != "" {
+			direction := normalizeOrderDirection(builder.CursorDirection)
+			pkField := primaryKeyFieldNameOrDefault(qb.schema, "id")
+			qOrders := buildStableCursorOrders(field, direction, pkField)
+			qb.orderBys = mergeOrderBysIfMissing(qb.orderBys, qOrders)
+
+			cursorCond, err := buildStableCursorCondition(field, direction, builder.CursorValue, builder.CursorPrimaryValue, pkField, false)
+			if err != nil {
+				return qb
+			}
+			if cursorCond != nil {
+				qb.Where(cursorCond)
+			}
+		}
+		return qb.Page(1, builder.PageSize)
+	}
+
+	return qb.Page(builder.Page, builder.PageSize)
 }
 
 func (qb *Neo4jQueryConstructor) Build(ctx context.Context) (string, []interface{}, error) {

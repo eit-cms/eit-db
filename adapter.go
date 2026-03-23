@@ -93,6 +93,10 @@ type Config struct {
 	// 适配器类型: "sqlite" | "postgres" | "mysql" | "sqlserver" | "mongodb" | "neo4j"
 	Adapter string `json:"adapter" yaml:"adapter"`
 
+	// EnableScheduledTaskFallback 控制定时任务在适配器不支持时是否自动回退到应用层调度器。
+	// nil 表示使用默认值（true）。
+	EnableScheduledTaskFallback *bool `json:"enable_scheduled_task_fallback,omitempty" yaml:"enable_scheduled_task_fallback,omitempty"`
+
 	// QueryCache 控制 Repository 级查询编译缓存策略。
 	QueryCache *QueryCacheConfig `json:"query_cache,omitempty" yaml:"query_cache,omitempty"`
 
@@ -169,15 +173,15 @@ type MySQLConnectionConfig struct {
 
 // SQLServerConnectionConfig SQL Server 连接配置。
 type SQLServerConnectionConfig struct {
-	Host     string `json:"host,omitempty" yaml:"host,omitempty"`
-	Port     int    `json:"port,omitempty" yaml:"port,omitempty"`
-	Username string `json:"username,omitempty" yaml:"username,omitempty"`
-	Password string `json:"password,omitempty" yaml:"password,omitempty"`
-	Database string `json:"database,omitempty" yaml:"database,omitempty"`
-	DSN      string `json:"dsn,omitempty" yaml:"dsn,omitempty"`
-	ManyToManyStrategy string `json:"many_to_many_strategy,omitempty" yaml:"many_to_many_strategy,omitempty"` // "direct_join" | "recursive_cte"
-	RecursiveCTEDepth   int    `json:"recursive_cte_depth,omitempty" yaml:"recursive_cte_depth,omitempty"`         // 默认 8
-	RecursiveCTEMaxRecursion int `json:"recursive_cte_max_recursion,omitempty" yaml:"recursive_cte_max_recursion,omitempty"` // 默认 100
+	Host                     string `json:"host,omitempty" yaml:"host,omitempty"`
+	Port                     int    `json:"port,omitempty" yaml:"port,omitempty"`
+	Username                 string `json:"username,omitempty" yaml:"username,omitempty"`
+	Password                 string `json:"password,omitempty" yaml:"password,omitempty"`
+	Database                 string `json:"database,omitempty" yaml:"database,omitempty"`
+	DSN                      string `json:"dsn,omitempty" yaml:"dsn,omitempty"`
+	ManyToManyStrategy       string `json:"many_to_many_strategy,omitempty" yaml:"many_to_many_strategy,omitempty"`             // "direct_join" | "recursive_cte"
+	RecursiveCTEDepth        int    `json:"recursive_cte_depth,omitempty" yaml:"recursive_cte_depth,omitempty"`                 // 默认 8
+	RecursiveCTEMaxRecursion int    `json:"recursive_cte_max_recursion,omitempty" yaml:"recursive_cte_max_recursion,omitempty"` // 默认 100
 }
 
 // MongoConnectionConfig MongoDB 连接配置。
@@ -225,6 +229,8 @@ type Repository struct {
 	adapter                 Adapter
 	startupCapabilityReport *StartupCapabilityReport
 	compiledQueryCache      *CompiledQueryCache
+	scheduledTaskFallbackOn bool
+	fallbackTaskManager     *inProcessScheduledTaskManager
 	mu                      sync.RWMutex
 }
 
@@ -401,7 +407,11 @@ func NewRepository(config *Config) (*Repository, error) {
 		cacheEnableMetrics = config.QueryCache.EnableMetrics
 	}
 
-	repo := &Repository{adapter: adapter, compiledQueryCache: NewCompiledQueryCacheWithOptions(cacheSize, time.Duration(cacheTTLSeconds)*time.Second, cacheEnableMetrics)}
+	repo := &Repository{
+		adapter:                 adapter,
+		compiledQueryCache:      NewCompiledQueryCacheWithOptions(cacheSize, time.Duration(cacheTTLSeconds)*time.Second, cacheEnableMetrics),
+		scheduledTaskFallbackOn: config.ScheduledTaskFallbackEnabled(),
+	}
 	if config.StartupCapabilities != nil {
 		report, checkErr := repo.RunStartupCapabilityCheck(context.Background(), config.StartupCapabilities)
 		repo.startupCapabilityReport = report
@@ -451,6 +461,11 @@ func (r *Repository) Close() error {
 	if r.compiledQueryCache != nil {
 		r.compiledQueryCache.close()
 		r.compiledQueryCache = nil
+	}
+
+	if r.fallbackTaskManager != nil {
+		r.fallbackTaskManager.stop()
+		r.fallbackTaskManager = nil
 	}
 
 	if r.adapter == nil {
@@ -568,6 +583,22 @@ type QueryConstructorExecutionResult struct {
 	Rows      []map[string]interface{}
 }
 
+// PagedQueryConstructorExecutionResult 表示带分页元信息的统一执行结果。
+type PagedQueryConstructorExecutionResult struct {
+	Statement     string
+	Args          []interface{}
+	Rows          []map[string]interface{}
+	Total         int64
+	Page          int
+	PageSize      int
+	Offset        int
+	TotalPages    int
+	HasNext       bool
+	HasPrevious   bool
+	QueryCacheHit bool
+	CountCacheHit bool
+}
+
 // QueryConstructorAutoExecutionResult 表示 QueryConstructor 自动路由执行结果。
 // Mode=query 表示查询结果在 Rows；Mode=exec 表示写入摘要在 Exec 中。
 type QueryConstructorAutoExecutionResult struct {
@@ -623,6 +654,169 @@ func (r *Repository) ExecuteQueryConstructorWithCache(ctx context.Context, cache
 		return nil, cacheHit, execErr
 	}
 	return result, cacheHit, nil
+}
+
+// ExecuteQueryConstructorPaged 执行分页查询，并返回总数与分页元信息。
+func (r *Repository) ExecuteQueryConstructorPaged(ctx context.Context, constructor QueryConstructor, page int, pageSize int) (*PagedQueryConstructorExecutionResult, error) {
+	builder := NewPaginationBuilder(page, pageSize).OffsetOnly()
+	return r.executeQueryConstructorPaginated(ctx, "", constructor, builder)
+}
+
+// ExecuteQueryConstructorPagedWithCache 执行分页查询，并为分页查询与 count 查询接入编译缓存。
+func (r *Repository) ExecuteQueryConstructorPagedWithCache(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, page int, pageSize int) (*PagedQueryConstructorExecutionResult, error) {
+	if strings.TrimSpace(cacheKeyPrefix) == "" {
+		return nil, fmt.Errorf("cache key prefix cannot be empty")
+	}
+	builder := NewPaginationBuilder(page, pageSize).OffsetOnly()
+	return r.executeQueryConstructorPaginated(ctx, cacheKeyPrefix, constructor, builder)
+}
+
+// ExecuteQueryConstructorPaginated 使用统一分页语义执行查询（offset/cursor/auto）。
+func (r *Repository) ExecuteQueryConstructorPaginated(ctx context.Context, constructor QueryConstructor, builder *PaginationBuilder) (*PagedQueryConstructorExecutionResult, error) {
+	return r.executeQueryConstructorPaginated(ctx, "", constructor, builder)
+}
+
+// ExecuteQueryConstructorPaginatedWithCache 使用统一分页语义执行查询，并为分页查询与 count 查询接入编译缓存。
+func (r *Repository) ExecuteQueryConstructorPaginatedWithCache(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, builder *PaginationBuilder) (*PagedQueryConstructorExecutionResult, error) {
+	if strings.TrimSpace(cacheKeyPrefix) == "" {
+		return nil, fmt.Errorf("cache key prefix cannot be empty")
+	}
+	return r.executeQueryConstructorPaginated(ctx, cacheKeyPrefix, constructor, builder)
+}
+
+func (r *Repository) executeQueryConstructorPaged(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, page int, pageSize int) (*PagedQueryConstructorExecutionResult, error) {
+	builder := NewPaginationBuilder(page, pageSize).OffsetOnly()
+	return r.executeQueryConstructorPaginated(ctx, cacheKeyPrefix, constructor, builder)
+}
+
+func (r *Repository) executeQueryConstructorPaginated(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, builder *PaginationBuilder) (*PagedQueryConstructorExecutionResult, error) {
+	if constructor == nil {
+		return nil, fmt.Errorf("query constructor cannot be nil")
+	}
+
+	normalizedBuilder, normalizedPage, normalizedPageSize, offset, cursorMode := normalizePaginationBuilder(builder)
+	constructor.Paginate(normalizedBuilder)
+
+	var (
+		execResult    *QueryConstructorExecutionResult
+		queryCacheHit bool
+		err           error
+	)
+
+	if strings.TrimSpace(cacheKeyPrefix) != "" {
+		modeKey := "offset"
+		if cursorMode {
+			modeKey = "cursor"
+		}
+		pageCacheKey := fmt.Sprintf("%s:mode:%s:page:%d:size:%d", cacheKeyPrefix, modeKey, normalizedPage, normalizedPageSize)
+		execResult, queryCacheHit, err = r.ExecuteQueryConstructorWithCache(ctx, pageCacheKey, constructor)
+	} else {
+		execResult, err = r.ExecuteQueryConstructor(ctx, constructor)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	total, countCacheHit, err := r.executeQueryConstructorCount(ctx, cacheKeyPrefix, constructor)
+	if err != nil {
+		return nil, err
+	}
+
+	totalPages := 0
+	if normalizedPageSize > 0 && total > 0 {
+		totalPages = int((total + int64(normalizedPageSize) - 1) / int64(normalizedPageSize))
+	}
+
+	return &PagedQueryConstructorExecutionResult{
+		Statement:     execResult.Statement,
+		Args:          execResult.Args,
+		Rows:          execResult.Rows,
+		Total:         total,
+		Page:          normalizedPage,
+		PageSize:      normalizedPageSize,
+		Offset:        offset,
+		TotalPages:    totalPages,
+		HasNext:       totalPages > 0 && normalizedPage < totalPages,
+		HasPrevious:   normalizedPage > 1,
+		QueryCacheHit: queryCacheHit,
+		CountCacheHit: countCacheHit,
+	}, nil
+}
+
+func normalizePaginationBuilder(builder *PaginationBuilder) (*PaginationBuilder, int, int, int, bool) {
+	if builder == nil {
+		page, pageSize, offset := normalizePaginationParams(1, defaultQueryPageSize)
+		return NewPaginationBuilder(page, pageSize), page, pageSize, offset, false
+	}
+
+	mode := builder.Mode
+	if mode == "" {
+		mode = PaginationModeAuto
+	}
+
+	cursorMode := mode == PaginationModeCursor || (mode == PaginationModeAuto && strings.TrimSpace(builder.CursorField) != "")
+	if cursorMode {
+		_, pageSize, _ := normalizePaginationParams(1, builder.PageSize)
+		normalized := &PaginationBuilder{
+			Mode:               PaginationModeCursor,
+			Page:               1,
+			PageSize:           pageSize,
+			CursorField:        strings.TrimSpace(builder.CursorField),
+			CursorDirection:    strings.TrimSpace(builder.CursorDirection),
+			CursorValue:        builder.CursorValue,
+			CursorPrimaryValue: builder.CursorPrimaryValue,
+		}
+		return normalized, 1, pageSize, 0, true
+	}
+
+	page, pageSize, offset := normalizePaginationParams(builder.Page, builder.PageSize)
+	normalized := &PaginationBuilder{
+		Mode:     PaginationModeOffset,
+		Page:     page,
+		PageSize: pageSize,
+	}
+	return normalized, page, pageSize, offset, false
+}
+
+type countCachingQueryConstructor interface {
+	buildCountConstructor() QueryConstructor
+}
+
+func (r *Repository) executeQueryConstructorCount(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor) (int64, bool, error) {
+	if strings.TrimSpace(cacheKeyPrefix) == "" {
+		count, err := constructor.SelectCount(ctx, r)
+		return count, false, err
+	}
+
+	cacheAware, ok := constructor.(countCachingQueryConstructor)
+	if !ok {
+		count, err := constructor.SelectCount(ctx, r)
+		return count, false, err
+	}
+
+	countQuery, args, cacheHit, err := r.BuildAndCacheQuery(ctx, cacheKeyPrefix+":count", cacheAware.buildCountConstructor())
+	if err != nil {
+		return 0, false, err
+	}
+
+	count, err := r.executeCompiledCountStatement(ctx, countQuery, args)
+	if err != nil {
+		return 0, cacheHit, err
+	}
+	return count, cacheHit, nil
+}
+
+func (r *Repository) executeCompiledCountStatement(ctx context.Context, query string, args []interface{}) (int64, error) {
+	if !looksLikeReadSQL(query) {
+		return 0, fmt.Errorf("count query must compile to SQL SELECT")
+	}
+
+	row := r.QueryRow(ctx, query, args...)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // ExecuteQueryConstructorAuto 执行 QueryConstructor，自动识别读/写语义并路由到 adapter。
@@ -918,9 +1112,10 @@ func (r *Repository) GetQueryBuilderCapabilities() (*QueryBuilderCapabilities, e
 //   - SQLite/其他: 建议由应用层通过 cron 库处理
 func (r *Repository) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	adapter := r.adapter
+	r.mu.RUnlock()
 
-	if r.adapter == nil {
+	if adapter == nil {
 		return fmt.Errorf("adapter is not initialized")
 	}
 
@@ -928,15 +1123,34 @@ func (r *Repository) RegisterScheduledTask(ctx context.Context, task *ScheduledT
 		return fmt.Errorf("invalid task configuration: %w", err)
 	}
 
-	return r.adapter.RegisterScheduledTask(ctx, task)
+	err := adapter.RegisterScheduledTask(ctx, task)
+	if err == nil {
+		return nil
+	}
+	if !r.scheduledTaskFallbackOn {
+		return err
+	}
+	if !shouldUseScheduledTaskFallback(err) {
+		return err
+	}
+
+	manager := r.getOrCreateFallbackTaskManager()
+	if manager == nil {
+		return err
+	}
+	if fallbackErr := manager.register(ctx, task); fallbackErr != nil {
+		return fallbackErr
+	}
+	return nil
 }
 
 // UnregisterScheduledTask 注销定时任务
 func (r *Repository) UnregisterScheduledTask(ctx context.Context, taskName string) error {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	adapter := r.adapter
+	r.mu.RUnlock()
 
-	if r.adapter == nil {
+	if adapter == nil {
 		return fmt.Errorf("adapter is not initialized")
 	}
 
@@ -944,19 +1158,76 @@ func (r *Repository) UnregisterScheduledTask(ctx context.Context, taskName strin
 		return fmt.Errorf("task name cannot be empty")
 	}
 
-	return r.adapter.UnregisterScheduledTask(ctx, taskName)
+	err := adapter.UnregisterScheduledTask(ctx, taskName)
+	if err == nil {
+		return nil
+	}
+	if !r.scheduledTaskFallbackOn {
+		return err
+	}
+	if !shouldUseScheduledTaskFallback(err) {
+		return err
+	}
+
+	r.mu.RLock()
+	manager := r.fallbackTaskManager
+	r.mu.RUnlock()
+	if manager == nil {
+		return err
+	}
+	return manager.unregister(ctx, taskName)
 }
 
 // ListScheduledTasks 列出所有已注册的定时任务
 func (r *Repository) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	adapter := r.adapter
+	manager := r.fallbackTaskManager
+	r.mu.RUnlock()
 
-	if r.adapter == nil {
+	if adapter == nil {
 		return nil, fmt.Errorf("adapter is not initialized")
 	}
 
-	return r.adapter.ListScheduledTasks(ctx)
+	tasks, err := adapter.ListScheduledTasks(ctx)
+	if err == nil {
+		if manager == nil {
+			return tasks, nil
+		}
+		fallbackTasks, listErr := manager.list(ctx)
+		if listErr != nil {
+			return tasks, nil
+		}
+		return append(tasks, fallbackTasks...), nil
+	}
+	if !r.scheduledTaskFallbackOn {
+		return nil, err
+	}
+	if !shouldUseScheduledTaskFallback(err) {
+		return nil, err
+	}
+	if manager == nil {
+		return nil, err
+	}
+	return manager.list(ctx)
+}
+
+func (r *Repository) getAdapterUnsafe() Adapter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.adapter
+}
+
+func (r *Repository) getOrCreateFallbackTaskManager() *inProcessScheduledTaskManager {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fallbackTaskManager != nil {
+		return r.fallbackTaskManager
+	}
+	manager := newInProcessScheduledTaskManager(r, &repositoryScheduledTaskExecutor{repo: r})
+	manager.start()
+	r.fallbackTaskManager = manager
+	return manager
 }
 
 // ==================== Query Builder Provider (v0.4.1) ====================

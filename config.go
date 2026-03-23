@@ -383,6 +383,10 @@ func cloneConfig(src *Config) *Config {
 		}
 		clone.Validation = &validation
 	}
+	if src.EnableScheduledTaskFallback != nil {
+		v := *src.EnableScheduledTaskFallback
+		clone.EnableScheduledTaskFallback = &v
+	}
 	if src.SQLite != nil {
 		sqliteCfg := *src.SQLite
 		clone.SQLite = &sqliteCfg
@@ -408,6 +412,28 @@ func cloneConfig(src *Config) *Config {
 		clone.Neo4j = &neo4jCfg
 	}
 	return &clone
+}
+
+// ScheduledTaskFallbackEnabled 返回定时任务回退开关的有效值。
+// 默认 true；当显式配置为 false 时禁用回退。
+func (c *Config) ScheduledTaskFallbackEnabled() bool {
+	if c == nil {
+		return true
+	}
+	if c.EnableScheduledTaskFallback != nil {
+		return *c.EnableScheduledTaskFallback
+	}
+	if c.Options != nil {
+		if v, ok := c.Options["scheduled_task_fallback"].(bool); ok {
+			return v
+		}
+		if raw, ok := c.Options["scheduled_task_fallback"].(string); ok {
+			if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+				return parsed
+			}
+		}
+	}
+	return true
 }
 
 func firstNonEmptyEnv(keys ...string) string {
@@ -751,6 +777,16 @@ func (c *Config) Validate() error {
 	}
 	if c.QueryCache.DefaultTTLSeconds < 0 {
 		return fmt.Errorf("query_cache.default_ttl_seconds must be >= 0")
+	}
+
+	if c.EnableScheduledTaskFallback == nil && c.Options != nil {
+		if v, ok := c.Options["scheduled_task_fallback"].(bool); ok {
+			c.EnableScheduledTaskFallback = &v
+		} else if raw, ok := c.Options["scheduled_task_fallback"].(string); ok {
+			if parsed, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+				c.EnableScheduledTaskFallback = &parsed
+			}
+		}
 	}
 
 	// 校验 locale 配置

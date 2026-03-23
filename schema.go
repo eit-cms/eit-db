@@ -186,7 +186,7 @@ type SchemaRelation struct {
 	OriginKey    string // 被引用的一侧字段名（通常是 PK）
 	Through      *RelationThrough
 	Reversible   bool  // 一对一可逆标记（或显式声明允许反向路径优化）
-	optional     *bool  // nil = 按 RelationType 默认；true/false 显式覆盖
+	optional     *bool // nil = 按 RelationType 默认；true/false 显式覆盖
 }
 
 // Semantic 根据关系类型和显式覆盖推断 JoinSemantic。
@@ -206,7 +206,8 @@ func (r *SchemaRelation) Semantic() JoinSemantic {
 // SemanticFromSource 从"源"的视角推断语义：
 // 当 source 连接到 join Schema，而 join Schema 声明了指向 source 的关系时使用。
 // 规则：join BelongsTo source → source 视角为 optional（source 可能有 0 个 join）
-//       join HasMany/HasOne source → source 视角为 required（source 是 join 的父实体，join 必有 FK）
+//
+//	join HasMany/HasOne source → source 视角为 required（source 是 join 的父实体，join 必有 FK）
 func (r *SchemaRelation) SemanticFromSource() JoinSemantic {
 	if r.optional != nil {
 		if *r.optional {
@@ -847,6 +848,8 @@ type QueryConstructor interface {
 	// 分页
 	Limit(count int) QueryConstructor
 	Offset(count int) QueryConstructor
+	Page(page int, pageSize int) QueryConstructor
+	Paginate(builder *PaginationBuilder) QueryConstructor
 
 	// 跨表查询（raw string JOIN）
 	FromAlias(alias string) QueryConstructor
@@ -876,6 +879,83 @@ type QueryConstructor interface {
 
 	// 获取底层查询构造器（用于 Adapter 特定优化）
 	GetNativeBuilder() interface{}
+}
+
+const defaultQueryPageSize = 20
+
+type PaginationMode string
+
+const (
+	PaginationModeAuto   PaginationMode = "auto"
+	PaginationModeOffset PaginationMode = "offset"
+	PaginationModeCursor PaginationMode = "cursor"
+)
+
+// PaginationBuilder 定义跨后端统一分页语义，不绑定 SQL 细节。
+type PaginationBuilder struct {
+	Mode               PaginationMode
+	Page               int
+	PageSize           int
+	CursorField        string
+	CursorDirection    string
+	CursorValue        interface{}
+	CursorPrimaryValue interface{}
+}
+
+func NewPaginationBuilder(page int, pageSize int) *PaginationBuilder {
+	return &PaginationBuilder{Mode: PaginationModeAuto, Page: page, PageSize: pageSize}
+}
+
+func NewCursorPaginationBuilder(field string, direction string, cursorValue interface{}, cursorPrimaryValue interface{}, pageSize int) *PaginationBuilder {
+	return &PaginationBuilder{
+		Mode:               PaginationModeCursor,
+		Page:               1,
+		PageSize:           pageSize,
+		CursorField:        strings.TrimSpace(field),
+		CursorDirection:    strings.TrimSpace(direction),
+		CursorValue:        cursorValue,
+		CursorPrimaryValue: cursorPrimaryValue,
+	}
+}
+
+func (b *PaginationBuilder) WithMode(mode PaginationMode) *PaginationBuilder {
+	if b == nil {
+		return nil
+	}
+	switch mode {
+	case PaginationModeOffset, PaginationModeCursor:
+		b.Mode = mode
+	default:
+		b.Mode = PaginationModeAuto
+	}
+	return b
+}
+
+func (b *PaginationBuilder) OffsetOnly() *PaginationBuilder {
+	return b.WithMode(PaginationModeOffset)
+}
+
+func (b *PaginationBuilder) CursorBy(field string, direction string, cursorValue interface{}, cursorPrimaryValue interface{}) *PaginationBuilder {
+	if b == nil {
+		return nil
+	}
+	b.Mode = PaginationModeCursor
+	b.CursorField = strings.TrimSpace(field)
+	b.CursorDirection = strings.TrimSpace(direction)
+	b.CursorValue = cursorValue
+	b.CursorPrimaryValue = cursorPrimaryValue
+	return b
+}
+
+func normalizePaginationParams(page int, pageSize int) (normalizedPage int, normalizedPageSize int, offset int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = defaultQueryPageSize
+	}
+	offset = (page - 1) * pageSize
+	return page, pageSize, offset
 }
 
 // CrossTableStrategy 跨表查询策略。

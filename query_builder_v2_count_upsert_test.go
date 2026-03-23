@@ -15,7 +15,7 @@ type upsertFallbackAdapter struct {
 func (a *upsertFallbackAdapter) Connect(ctx context.Context, config *Config) error {
 	return a.inner.Connect(ctx, config)
 }
-func (a *upsertFallbackAdapter) Close() error { return a.inner.Close() }
+func (a *upsertFallbackAdapter) Close() error                   { return a.inner.Close() }
 func (a *upsertFallbackAdapter) Ping(ctx context.Context) error { return a.inner.Ping(ctx) }
 func (a *upsertFallbackAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, error) {
 	return a.inner.Begin(ctx, opts...)

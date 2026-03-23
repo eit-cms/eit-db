@@ -39,12 +39,12 @@ type MongoQueryConstructor struct {
 // 以过滤掉无匹配文档（等价于 INNER JOIN）。
 // 对于 optional 语义（HasMany/HasOne）：无需额外处理（等价于 LEFT JOIN/OPTIONAL MATCH）。
 type MongoLookupStage struct {
-	From         string       `json:"from"`           // 目标集合名
-	LocalField   string       `json:"localField"`     // 本集合中的连接字段
-	ForeignField string       `json:"foreignField"`   // 目标集合中的连接字段
-	As           string       `json:"as"`             // 输出数组字段名（alias）
-	Semantic     JoinSemantic `json:"semantic"`       // optional → 保留空数组；required → 需过滤
-	ThroughArtifact bool      `json:"throughArtifact,omitempty"` // true 表示中间关系临时字段
+	From            string       `json:"from"`                      // 目标集合名
+	LocalField      string       `json:"localField"`                // 本集合中的连接字段
+	ForeignField    string       `json:"foreignField"`              // 目标集合中的连接字段
+	As              string       `json:"as"`                        // 输出数组字段名（alias）
+	Semantic        JoinSemantic `json:"semantic"`                  // optional → 保留空数组；required → 需过滤
+	ThroughArtifact bool         `json:"throughArtifact,omitempty"` // true 表示中间关系临时字段
 }
 
 // MongoCompiledFindPlan 是 Mongo QueryConstructor 编译后的可执行计划。
@@ -179,6 +179,49 @@ func (qb *MongoQueryConstructor) Limit(count int) QueryConstructor {
 func (qb *MongoQueryConstructor) Offset(count int) QueryConstructor {
 	qb.offsetVal = &count
 	return qb
+}
+
+func (qb *MongoQueryConstructor) Page(page int, pageSize int) QueryConstructor {
+	_, normalizedPageSize, offset := normalizePaginationParams(page, pageSize)
+	qb.limitVal = &normalizedPageSize
+	if offset <= 0 {
+		qb.offsetVal = nil
+		return qb
+	}
+	qb.offsetVal = &offset
+	return qb
+}
+
+func (qb *MongoQueryConstructor) Paginate(builder *PaginationBuilder) QueryConstructor {
+	if builder == nil {
+		return qb.Page(1, defaultQueryPageSize)
+	}
+
+	mode := builder.Mode
+	if mode == "" {
+		mode = PaginationModeAuto
+	}
+
+	if mode == PaginationModeCursor || (mode == PaginationModeAuto && strings.TrimSpace(builder.CursorField) != "") {
+		field := strings.TrimSpace(builder.CursorField)
+		if field != "" {
+			direction := normalizeOrderDirection(builder.CursorDirection)
+			pkField := primaryKeyFieldNameOrDefault(qb.schema, "id")
+			qOrders := buildStableCursorOrders(field, direction, pkField)
+			qb.orderBys = mergeOrderBysIfMissing(qb.orderBys, qOrders)
+
+			cursorCond, err := buildStableCursorCondition(field, direction, builder.CursorValue, builder.CursorPrimaryValue, pkField, false)
+			if err != nil {
+				return qb
+			}
+			if cursorCond != nil {
+				qb.Where(cursorCond)
+			}
+		}
+		return qb.Page(1, builder.PageSize)
+	}
+
+	return qb.Page(builder.Page, builder.PageSize)
 }
 
 func (qb *MongoQueryConstructor) FromAlias(alias string) QueryConstructor {
@@ -432,17 +475,17 @@ func resolveMongoLookups(sourceSchema Schema, join mongoJoinClause) []MongoLooku
 	// many-to-many + through：编译为两段 lookup（source -> through -> target）
 	if rel := buildQueryJoinRelationIR(sourceSchema, join.schema); rel != nil &&
 		rel.Type == RelationManyToMany && rel.Through != nil && strings.TrimSpace(rel.Through.Table) != "" {
-		sourcePK := primaryKeyNameOrDefault(sourceSchema)
-		targetPK := primaryKeyNameOrDefault(join.schema)
+		sourcePK := primaryKeyFieldNameOrDefault(sourceSchema, "id")
+		targetPK := primaryKeyFieldNameOrDefault(join.schema, "id")
 		throughAlias := alias + "_through"
 
 		return []MongoLookupStage{
 			{
-				From:         strings.TrimSpace(rel.Through.Table),
-				LocalField:   sourcePK,
-				ForeignField: strings.TrimSpace(rel.Through.SourceKey),
-				As:           throughAlias,
-				Semantic:     JoinSemanticOptional,
+				From:            strings.TrimSpace(rel.Through.Table),
+				LocalField:      sourcePK,
+				ForeignField:    strings.TrimSpace(rel.Through.SourceKey),
+				As:              throughAlias,
+				Semantic:        JoinSemanticOptional,
 				ThroughArtifact: true,
 			},
 			{
@@ -507,18 +550,6 @@ func resolveMongoLookups(sourceSchema Schema, join mongoJoinClause) []MongoLooku
 		As:           alias,
 		Semantic:     join.semantic,
 	}}
-}
-
-func primaryKeyNameOrDefault(schema Schema) string {
-	if schema != nil {
-		if pk := schema.PrimaryKeyField(); pk != nil {
-			name := strings.TrimSpace(pk.Name)
-			if name != "" {
-				return name
-			}
-		}
-	}
-	return "id"
 }
 
 // resolveMongoFieldsFromFK 从 FK 约束推断 localField / foreignField（兜底方案）。

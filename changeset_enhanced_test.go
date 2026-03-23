@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -362,6 +363,103 @@ func TestCombinedValidations(t *testing.T) {
 
 	if !cs.IsValid() {
 		t.Errorf("Combined validations failed, errors: %v", cs.Errors())
+	}
+}
+
+func TestChangesetAccessorsAndMutations(t *testing.T) {
+	schema := NewBaseSchema("users")
+	schema.AddField(&Field{Name: "name", Type: TypeString})
+	schema.AddField(&Field{Name: "phone", Type: TypeString})
+
+	cs := FromMap(schema, map[string]interface{}{"name": "alice", "phone": "+1 (415) 555-2671"})
+	cs.PutChange("name", "bob")
+	cs.PutChange("unknown", "ignored")
+
+	if got := cs.Get("name"); got != "bob" {
+		t.Fatalf("expected updated name, got %v", got)
+	}
+	if prev := cs.GetPrevious("name"); prev != "alice" {
+		t.Fatalf("expected previous value alice, got %v", prev)
+	}
+	if !cs.HasChanged("name") {
+		t.Fatalf("expected name marked as changed")
+	}
+	changedVal, ok := cs.GetChanged("name")
+	if !ok || changedVal != "bob" {
+		t.Fatalf("expected changed name bob, got %v, %v", changedVal, ok)
+	}
+	if cs.GetChange("name") != "bob" {
+		t.Fatalf("expected GetChange to return bob")
+	}
+
+	data := cs.Data()
+	changes := cs.Changes()
+	data["name"] = "mutated"
+	changes["name"] = "mutated"
+	if cs.Get("name") != "bob" || cs.GetChange("name") != "bob" {
+		t.Fatalf("expected Data/Changes to return defensive copies")
+	}
+
+	fields := cs.GetChangedFields()
+	if !slices.Contains(fields, "name") {
+		t.Fatalf("expected changed fields to contain name, got %v", fields)
+	}
+	if cs.ToMap()["name"] != "bob" {
+		t.Fatalf("expected ToMap to reflect changed values")
+	}
+	if cs.action() != ActionUpdate {
+		t.Fatalf("expected action to resolve to update after previous values exist")
+	}
+	if cs.ApplyAction(ActionDelete) != cs {
+		t.Fatalf("expected ApplyAction to return receiver")
+	}
+}
+
+func TestValidateChangeHelpers(t *testing.T) {
+	prevLocale := GetValidationLocale()
+	defer func() {
+		_ = SetValidationLocale(prevLocale)
+	}()
+
+	schema := NewBaseSchema("users")
+	schema.AddField(&Field{Name: "name", Type: TypeString})
+	schema.AddField(&Field{Name: "phone", Type: TypeString})
+
+	cs := NewChangeset(schema)
+	cs.PutChange("name", "bob")
+	cs.ValidateChange("name", &RegexValidator{Pattern: `^[A-Z]+$`, Code: "regex", InvalidType: "must be string", InvalidValue: "invalid format"})
+	if cs.IsValid() {
+		t.Fatalf("expected ValidateChange to mark changeset invalid")
+	}
+	if len(cs.GetError("name")) == 0 {
+		t.Fatalf("expected name validation error")
+	}
+	if cs.ErrorString() == "" {
+		t.Fatalf("expected ErrorString to include validation errors")
+	}
+	cs.ClearError("name")
+	if !cs.IsValid() {
+		t.Fatalf("expected ClearError to restore valid state")
+	}
+
+	if err := SetValidationLocale("zh-CN"); err != nil {
+		t.Fatalf("failed to set locale: %v", err)
+	}
+	cs.PutChange("phone", "+1 (415) 555-2671")
+	cs.ValidateChangeWithLocale("phone", &PhoneNumberValidator{}, "en-US")
+	if !cs.IsValid() {
+		t.Fatalf("expected ValidateChangeWithLocale to accept en-US phone, errors=%v", cs.Errors())
+	}
+
+	cs2 := NewChangeset(schema)
+	cs2.PutChange("phone", "+1 (415) 555-2671")
+	ctx := WithValidationLocale(context.Background(), "en-US")
+	cs2.ValidateChangeWithContext(ctx, "phone", &PhoneNumberValidator{})
+	if !cs2.IsValid() {
+		t.Fatalf("expected ValidateChangeWithContext to accept context locale, errors=%v", cs2.Errors())
+	}
+	if NewChangeset(schema).ValidateChange("missing", &PhoneNumberValidator{}) == nil {
+		t.Fatalf("expected ValidateChange to return receiver even when field missing")
 	}
 }
 

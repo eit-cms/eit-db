@@ -116,7 +116,7 @@ func (m *SchemaMigration) Up(ctx context.Context, repo *Repository) error {
 // Down 回滚迁移
 func (m *SchemaMigration) Down(ctx context.Context, repo *Repository) error {
 	if supportsSQLDDL(repo) {
-	// Phase 1: 逆序删除视图（视图引用表，必须先删）
+		// Phase 1: 逆序删除视图（视图引用表，必须先删）
 		for i := len(m.createSchemas) - 1; i >= 0; i-- {
 			schema := m.createSchemas[i]
 			cs, ok := schema.(constraintSchema)

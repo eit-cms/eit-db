@@ -282,6 +282,14 @@ MongoDB Adapter 通过 `HasCustomFeatureImplementation` / `ExecuteCustomFeature`
 | `document_join` / `custom_joiner` | 生成 `$lookup` Aggregation Pipeline 模板，支持多字段 |
 | `full_text_search` | 生成基于 `$text` 索引的全文搜索 pipeline |
 | `tokenized_full_text_search` | 生成应用层分词 + `$regex` 组合查询 pipeline |
+| `log_special_tokenization` | 日志规则分词（ip/url/error_code/trace_id/hashtag） |
+| `log_hot_words` | 全量日志热词统计 |
+| `log_hot_words_by_level` | 按日志级别（ERROR/WARN/INFO）统计热词 |
+| `log_hot_words_by_time_window` | 按小时/天时间窗口统计热词 |
+| `article_draft_management` | 文章草稿状态流转（create/update/publish/archive/restore/info/query_plan） |
+| `article_draft_query_plan` | 输出草稿/待发布/已发布/归档的查询计划（filter/projection/sort/limit/skip） |
+| `article_template_preset_library` | 内置模板库（blog/news/knowledge_base）列表与读取 |
+| `article_template_rendering` | Go 标准模板渲染，支持模板白名单函数与安全策略 |
 
 ```go
 result, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "document_join", map[string]interface{}{
@@ -293,6 +301,138 @@ result, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "document_join", map[
 })
 // result["pipeline"] 为可直接传入 collection.Aggregate() 的 pipeline
 ```
+
+## 文档编辑与模板渲染能力（Why + How）
+
+### 为什么提供这组能力
+
+1. 文档类业务（CMS、知识库、公告系统）通常要同时处理“编辑中草稿”和“对外渲染内容”，仅靠基础 CRUD 容易在业务层重复造轮子。
+2. 模板渲染若没有统一策略，常见问题是模板风格不一致、字段缺失时静默失败、函数滥用带来维护风险。
+3. 查询计划输出可将“状态筛选 + 分页排序”标准化，便于 API 层和后台任务复用同一过滤语义。
+
+### 用法一：草稿状态管理 + 查询计划
+
+```go
+// 1) 创建草稿
+draftOut, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_draft_management", map[string]interface{}{
+    "operation": "create",
+    "article": map[string]interface{}{
+        "title":   "Mongo Article",
+        "content": "Draft content",
+        "author_id": "u1001",
+    },
+    "tags":     []string{"db", "cms"},
+    "category": "tech",
+    "priority": 3,
+})
+if err != nil {
+    panic(err)
+}
+
+// 2) 构建“已发布文章”查询计划（可直接给集合查询层使用）
+planOut, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_draft_query_plan", map[string]interface{}{
+    "status":    "published",   // draft | pending_publish | published | archived | all
+    "author_id": "u1001",
+    "category":  "tech",
+    "sort_by":   "updated_at",
+    "sort_order": -1,
+    "limit":     20,
+    "skip":      0,
+})
+if err != nil {
+    panic(err)
+}
+
+_ = draftOut
+_ = planOut // planOut["query_plan"] 包含 collection/filter/projection/sort/limit/skip
+```
+
+### 用法二：模板库 + 安全渲染
+
+```go
+// 1) 列出内置模板
+presets, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_template_preset_library", map[string]interface{}{
+    "operation": "list",
+})
+if err != nil {
+    panic(err)
+}
+
+// 2) 使用 news 预设模板渲染
+rendered, err := repo.GetAdapter().ExecuteCustomFeature(ctx, "article_template_rendering", map[string]interface{}{
+    "template_preset": "news",
+    "template_name":   "news_card",
+    "data": map[string]interface{}{
+        "title":    "Weekly Digest",
+        "lead":     "This week in engineering",
+        "content":  "...",
+        "reporter": "Team A",
+        "source":   "Internal",
+    },
+    "enable_functions": true,
+    "strict_variables": true,
+    "max_template_size": 4096,
+    "allowed_functions": []string{"trim", "upper", "lower", "join"},
+})
+if err != nil {
+    panic(err)
+}
+
+_ = presets
+_ = rendered // rendered["rendered_output"] 为最终文本
+```
+
+### 安全策略建议
+
+1. 对外部可编辑模板，建议始终设置 `max_template_size` 和 `strict_variables=true`。
+2. 开启 `enable_functions` 时，建议使用 `allowed_functions` 白名单，避免模板层过度复杂化。
+3. 若仅需要固定风格页面，建议优先使用 `article_template_preset_library`，减少自定义模板维护成本。
+
+### REST API 对接建议
+
+如果你的项目是前后端分离（CMS、知识库后台、运营平台），建议用下表直接映射：
+
+| 路由 | Method | 特性调用 | 说明 |
+|---|---|---|---|
+| /api/articles/draft | POST | article_draft_management | operation=create/update |
+| /api/articles/publish | POST | article_draft_management | operation=publish |
+| /api/articles/archive | POST | article_draft_management | operation=archive |
+| /api/articles/restore | POST | article_draft_management | operation=restore |
+| /api/articles/query-plan | POST | article_draft_query_plan | 产出筛选计划用于列表与批处理 |
+| /api/articles/templates/presets | GET | article_template_preset_library | operation=list |
+| /api/articles/render | POST | article_template_rendering | 支持 template 或 template_preset |
+
+推荐请求体约定：
+
+1. 草稿接口统一使用 operation 字段驱动状态迁移。
+2. 渲染接口优先 template_preset，只有需要高度自定义时再传 template。
+3. 安全策略字段统一放在根级，便于 API 网关做参数校验：
+     - strict_variables
+     - max_template_size
+     - allowed_functions
+
+推荐响应体约定：
+
+```json
+{
+    "strategy": "article_template_rendering",
+    "template_name": "news_card",
+    "template_preset": "news",
+    "rendered_output": "...",
+    "security_policy": {
+        "max_template_size": 4096,
+        "strict_variables": true,
+        "allowed_functions": ["trim", "upper", "join"]
+    }
+}
+```
+
+错误码映射建议：
+
+1. 参数缺失（例如未传 template/template_preset）返回 400。
+2. 模板解析失败返回 422。
+3. 非法模板函数或超出安全策略返回 422。
+4. 不支持的 operation/status 返回 400。
 
 ## 全文搜索运行时探测
 

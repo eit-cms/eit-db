@@ -2,7 +2,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"reflect"
 	"testing"
+	"time"
 )
 
 // TestStruct 测试用的结构体
@@ -284,5 +287,57 @@ func TestInferSchemaMergeGormAndEITTag(t *testing.T) {
 	profile := schema.GetField("profile")
 	if profile == nil || profile.Type != TypeJSON {
 		t.Fatalf("expected profile type override to json, got: %+v", profile)
+	}
+}
+
+func TestParseFieldTypeAliasAndInferFieldType(t *testing.T) {
+	aliasCases := []struct {
+		input    string
+		expected FieldType
+		ok       bool
+	}{
+		{input: "varchar", expected: TypeString, ok: true},
+		{input: "integer", expected: TypeInteger, ok: true},
+		{input: "double", expected: TypeFloat, ok: true},
+		{input: "boolean", expected: TypeBoolean, ok: true},
+		{input: "timestamp", expected: TypeTime, ok: true},
+		{input: "blob", expected: TypeBinary, ok: true},
+		{input: "numeric", expected: TypeDecimal, ok: true},
+		{input: "map", expected: TypeMap, ok: true},
+		{input: "array", expected: TypeArray, ok: true},
+		{input: "json", expected: TypeJSON, ok: true},
+		{input: "geo", expected: TypeLocation, ok: true},
+		{input: "unknown", expected: "", ok: false},
+	}
+
+	for _, tc := range aliasCases {
+		got, ok := parseFieldTypeAlias(tc.input)
+		if ok != tc.ok || got != tc.expected {
+			t.Fatalf("parseFieldTypeAlias(%q) = (%q, %v), want (%q, %v)", tc.input, got, ok, tc.expected, tc.ok)
+		}
+	}
+
+	inferCases := []struct {
+		name     string
+		typeOf   reflect.Type
+		expected FieldType
+	}{
+		{name: "string", typeOf: reflect.TypeOf(""), expected: TypeString},
+		{name: "int", typeOf: reflect.TypeOf(int64(1)), expected: TypeInteger},
+		{name: "float", typeOf: reflect.TypeOf(float32(1)), expected: TypeFloat},
+		{name: "bool", typeOf: reflect.TypeOf(true), expected: TypeBoolean},
+		{name: "time", typeOf: reflect.TypeOf(time.Time{}), expected: TypeTime},
+		{name: "null string", typeOf: reflect.TypeOf(sql.NullString{}), expected: TypeString},
+		{name: "bytes", typeOf: reflect.TypeOf([]byte{}), expected: TypeBinary},
+		{name: "slice", typeOf: reflect.TypeOf([]string{}), expected: TypeArray},
+		{name: "map", typeOf: reflect.TypeOf(map[string]any{}), expected: TypeMap},
+		{name: "struct", typeOf: reflect.TypeOf(struct{ Name string }{}), expected: TypeJSON},
+		{name: "pointer", typeOf: reflect.TypeOf(&time.Time{}), expected: TypeTime},
+	}
+
+	for _, tc := range inferCases {
+		if got := inferFieldType(tc.typeOf); got != tc.expected {
+			t.Fatalf("%s: inferFieldType() = %q, want %q", tc.name, got, tc.expected)
+		}
 	}
 }

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -107,5 +108,72 @@ func TestWithChangesetRollbackOnError(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected rollback to leave 0 rows, got %d", count)
+	}
+}
+
+func TestChangesetExecutorGuardRails(t *testing.T) {
+	var executor *ChangesetExecutor
+	cs := NewChangeset(buildUserSchemaForChangesetExecutor())
+
+	if _, err := executor.Insert(cs); err == nil {
+		t.Fatalf("expected nil executor insert to fail")
+	}
+	if _, err := executor.Update(cs, "id = ?", 1); err == nil {
+		t.Fatalf("expected nil executor update to fail")
+	}
+	if _, err := executor.UpdateByID(1, cs); err == nil {
+		t.Fatalf("expected nil executor update by id to fail")
+	}
+	if _, err := executor.Delete("id = ?", 1); err == nil {
+		t.Fatalf("expected nil executor delete to fail")
+	}
+	if _, err := executor.DeleteByID(1); err == nil {
+		t.Fatalf("expected nil executor delete by id to fail")
+	}
+	if _, err := executor.SoftDelete("id = ?", 1); err == nil {
+		t.Fatalf("expected nil executor soft delete to fail")
+	}
+	if _, err := executor.SoftDeleteByID(1); err == nil {
+		t.Fatalf("expected nil executor soft delete by id to fail")
+	}
+}
+
+func TestNewChangesetExecutorAndWithChangesetValidation(t *testing.T) {
+	schema := buildUserSchemaForChangesetExecutor()
+
+	var nilRepo *Repository
+	if _, err := nilRepo.NewChangesetExecutor(context.Background(), schema); err == nil {
+		t.Fatalf("expected nil repository to fail")
+	}
+
+	repo := &Repository{}
+	if _, err := repo.NewChangesetExecutor(context.Background(), nil); err == nil {
+		t.Fatalf("expected nil schema to fail")
+	}
+	if _, err := repo.NewChangesetExecutor(context.Background(), schema); err == nil {
+		t.Fatalf("expected missing adapter to fail")
+	}
+
+	if err := nilRepo.WithChangeset(context.Background(), schema, func(*ChangesetExecutor) error { return nil }); err == nil {
+		t.Fatalf("expected nil repository WithChangeset to fail")
+	}
+	if err := repo.WithChangeset(context.Background(), nil, func(*ChangesetExecutor) error { return nil }); err == nil {
+		t.Fatalf("expected nil schema WithChangeset to fail")
+	}
+	if err := repo.WithChangeset(context.Background(), schema, nil); err == nil {
+		t.Fatalf("expected nil callback WithChangeset to fail")
+	}
+}
+
+func TestWithChangesetCallbackError(t *testing.T) {
+	repo := createChangesetExecutorTestRepo(t)
+	defer repo.Close()
+
+	wantErr := fmt.Errorf("stop")
+	err := repo.WithChangeset(context.Background(), buildUserSchemaForChangesetExecutor(), func(executor *ChangesetExecutor) error {
+		return wantErr
+	})
+	if err == nil || err.Error() != wantErr.Error() {
+		t.Fatalf("expected callback error to bubble up, got %v", err)
 	}
 }
