@@ -186,18 +186,88 @@ type SQLServerConnectionConfig struct {
 
 // MongoConnectionConfig MongoDB 连接配置。
 type MongoConnectionConfig struct {
-	URI                  string `json:"uri,omitempty" yaml:"uri,omitempty"`
-	Database             string `json:"database,omitempty" yaml:"database,omitempty"`
-	RelationJoinStrategy string `json:"relation_join_strategy,omitempty" yaml:"relation_join_strategy,omitempty"` // "lookup" | "pipeline"
-	HideThroughArtifacts *bool  `json:"hide_through_artifacts,omitempty" yaml:"hide_through_artifacts,omitempty"` // 默认 true
+	URI                  string                `json:"uri,omitempty" yaml:"uri,omitempty"`
+	Database             string                `json:"database,omitempty" yaml:"database,omitempty"`
+	RelationJoinStrategy string                `json:"relation_join_strategy,omitempty" yaml:"relation_join_strategy,omitempty"` // "lookup" | "pipeline"
+	HideThroughArtifacts *bool                 `json:"hide_through_artifacts,omitempty" yaml:"hide_through_artifacts,omitempty"` // 默认 true
+	LogSystem            *MongoLogSystemConfig `json:"log_system,omitempty" yaml:"log_system,omitempty"`
+}
+
+// MongoLogSystemConfig MongoDB 日志系统特性配置。
+type MongoLogSystemConfig struct {
+	// 热词提取默认参数
+	DefaultTopK        int `json:"default_top_k,omitempty" yaml:"default_top_k,omitempty"`                 // 默认 20
+	DefaultMinTokenLen int `json:"default_min_token_len,omitempty" yaml:"default_min_token_len,omitempty"` // 默认 2
+
+	// 停用词配置
+	ExtraStopWords          []string `json:"extra_stop_words,omitempty" yaml:"extra_stop_words,omitempty"`
+	DisableBuiltinStopWords bool     `json:"disable_builtin_stop_words,omitempty" yaml:"disable_builtin_stop_words,omitempty"`
+
+	// 分词规则：内置规则 "ip" | "url" | "error_code" | "trace_id" | "hashtag"；可追加自定义规则名
+	DefaultTokenizationRules []string `json:"default_tokenization_rules,omitempty" yaml:"default_tokenization_rules,omitempty"`
+
+	// 自定义分词规则正则表达式（规则名 -> 正则字符串），优先级高于内置规则
+	CustomTokenizationPatterns map[string]string `json:"custom_tokenization_patterns,omitempty" yaml:"custom_tokenization_patterns,omitempty"`
+
+	// 日志字段名称
+	DefaultLevelField string `json:"default_level_field,omitempty" yaml:"default_level_field,omitempty"` // 默认 "level"
+	DefaultTimeField  string `json:"default_time_field,omitempty" yaml:"default_time_field,omitempty"`   // 默认 "timestamp"
+
+	// 热词持久化集合名（用于 log_hot_words 持久化场景）
+	HotWordCollection string `json:"hot_word_collection,omitempty" yaml:"hot_word_collection,omitempty"` // 默认 "eit_log_hot_words"
+
+	// 自定义领域热词词库（词 -> 计数加成），可预置业务关键词
+	CustomHotWords map[string]int `json:"custom_hot_words,omitempty" yaml:"custom_hot_words,omitempty"`
 }
 
 // Neo4jConnectionConfig Neo4j 连接配置。
 type Neo4jConnectionConfig struct {
-	URI      string `json:"uri,omitempty" yaml:"uri,omitempty"`
-	Username string `json:"username,omitempty" yaml:"username,omitempty"`
-	Password string `json:"password,omitempty" yaml:"password,omitempty"`
-	Database string `json:"database,omitempty" yaml:"database,omitempty"`
+	URI           string                    `json:"uri,omitempty" yaml:"uri,omitempty"`
+	Username      string                    `json:"username,omitempty" yaml:"username,omitempty"`
+	Password      string                    `json:"password,omitempty" yaml:"password,omitempty"`
+	Database      string                    `json:"database,omitempty" yaml:"database,omitempty"`
+	SocialNetwork *Neo4jSocialNetworkConfig `json:"social_network,omitempty" yaml:"social_network,omitempty"`
+}
+
+// Neo4jSocialNetworkConfig Neo4j 社交网络特性配置。
+type Neo4jSocialNetworkConfig struct {
+	// 节点标签（留空则使用默认值）
+	UserLabel        string `json:"user_label,omitempty" yaml:"user_label,omitempty"`                 // 默认 "User"
+	ChatRoomLabel    string `json:"chat_room_label,omitempty" yaml:"chat_room_label,omitempty"`       // 默认 "ChatRoom"
+	ChatMessageLabel string `json:"chat_message_label,omitempty" yaml:"chat_message_label,omitempty"` // 默认 "ChatMessage"
+	PostLabel        string `json:"post_label,omitempty" yaml:"post_label,omitempty"`                 // 默认 "Post"
+	CommentLabel     string `json:"comment_label,omitempty" yaml:"comment_label,omitempty"`           // 默认 "Comment"
+	ForumLabel       string `json:"forum_label,omitempty" yaml:"forum_label,omitempty"`               // 默认 "Forum"
+	EmojiLabel       string `json:"emoji_label,omitempty" yaml:"emoji_label,omitempty"`               // 默认 "Emoji"
+
+	// 关系类型（留空则使用默认值）
+	FollowsRelType       string `json:"follows_rel_type,omitempty" yaml:"follows_rel_type,omitempty"`               // 默认 "FOLLOWS"
+	FriendRelType        string `json:"friend_rel_type,omitempty" yaml:"friend_rel_type,omitempty"`                 // 默认 "FRIEND"
+	FriendRequestRelType string `json:"friend_request_rel_type,omitempty" yaml:"friend_request_rel_type,omitempty"` // 默认 "FRIEND_REQUEST"
+	SentRelType          string `json:"sent_rel_type,omitempty" yaml:"sent_rel_type,omitempty"`                     // 默认 "SENT"
+	MemberOfRelType      string `json:"member_of_rel_type,omitempty" yaml:"member_of_rel_type,omitempty"`           // 默认 "MEMBER_OF"
+	InRoomRelType        string `json:"in_room_rel_type,omitempty" yaml:"in_room_rel_type,omitempty"`               // 默认 "IN"
+	InRoomMsgRelType     string `json:"in_room_msg_rel_type,omitempty" yaml:"in_room_msg_rel_type,omitempty"`       // 默认 "IN_ROOM"（消息→聊天室）
+	MutedInRelType       string `json:"muted_in_rel_type,omitempty" yaml:"muted_in_rel_type,omitempty"`             // 默认 "MUTED_IN"
+	BannedInRelType      string `json:"banned_in_rel_type,omitempty" yaml:"banned_in_rel_type,omitempty"`           // 默认 "BANNED_IN"
+	ReadByRelType        string `json:"read_by_rel_type,omitempty" yaml:"read_by_rel_type,omitempty"`               // 默认 "READ_BY"
+	AuthoredRelType      string `json:"authored_rel_type,omitempty" yaml:"authored_rel_type,omitempty"`             // 默认 "AUTHORED"
+	CreatedRelType       string `json:"created_rel_type,omitempty" yaml:"created_rel_type,omitempty"`               // 默认 "CREATED"（聊天室创建者）
+
+	// 全文索引名称
+	ChatMessageFulltextIndex string `json:"chat_message_fulltext_index,omitempty" yaml:"chat_message_fulltext_index,omitempty"` // 默认 "chat_message_fulltext"
+
+	// 加入聊天室策略: "request_approval"（需审批，默认）| "open"（直接加入）
+	JoinRoomStrategy string `json:"join_room_strategy,omitempty" yaml:"join_room_strategy,omitempty"`
+
+	// 私信权限策略: "mutual_follow_or_friend"（默认）| "friends_only" | "mutual_follow_only" | "open"
+	DirectChatPermission string `json:"direct_chat_permission,omitempty" yaml:"direct_chat_permission,omitempty"`
+
+	// 具备 mute/ban 权限的关系类型列表（默认 ["CREATED"]，即仅房间创建者可管理）
+	ModerationRelTypes []string `json:"moderation_rel_types,omitempty" yaml:"moderation_rel_types,omitempty"`
+
+	// 成员权限级别定义（从低到高，供业务层查询使用）
+	PermissionLevels []string `json:"permission_levels,omitempty" yaml:"permission_levels,omitempty"`
 }
 
 // ValidationConfig 校验 locale 配置
