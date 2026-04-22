@@ -282,8 +282,15 @@ func (c *Config) ResolvedNeo4jConfig() *Neo4jConnectionConfig {
 			resolved.URI = strings.TrimSpace(uri)
 		}
 	}
+	// 设置默认值
 	if resolved.Database == "" {
 		resolved.Database = "neo4j"
+	}
+	if resolved.Username == "" {
+		resolved.Username = "neo4j"
+	}
+	if resolved.URI == "" {
+		resolved.URI = "neo4j://localhost:7687"
 	}
 	resolved.SocialNetwork = resolvedNeo4jSocialNetworkConfig(resolved.SocialNetwork)
 	return resolved

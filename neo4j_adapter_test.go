@@ -7,15 +7,56 @@ import (
 	"testing"
 )
 
-func TestNeo4jConfigValidationRequiresURIAndUsername(t *testing.T) {
+func TestNeo4jConfigValidationUsesDefaultValues(t *testing.T) {
+	// 测试：没有明确指定URI/Username/Database时，使用默认值
 	cfg := &Config{
 		Adapter: "neo4j",
 		Neo4j: &Neo4jConnectionConfig{
-			Database: "neo4j",
+			// 空配置 - 应该使用默认值
 		},
 	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatalf("expected validation error for missing uri/username")
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected validation to pass with default values, got error: %v", err)
+	}
+	
+	// 验证默认值已被设置
+	resolved := cfg.ResolvedNeo4jConfig()
+	if resolved.URI != "neo4j://localhost:7687" {
+		t.Errorf("expected default URI 'neo4j://localhost:7687', got '%s'", resolved.URI)
+	}
+	if resolved.Username != "neo4j" {
+		t.Errorf("expected default username 'neo4j', got '%s'", resolved.Username)
+	}
+	if resolved.Database != "neo4j" {
+		t.Errorf("expected default database 'neo4j', got '%s'", resolved.Database)
+	}
+}
+
+func TestNeo4jConfigValidationOverridesDefaultValues(t *testing.T) {
+	// 测试：指定的值会覆盖默认值
+	cfg := &Config{
+		Adapter: "neo4j",
+		Neo4j: &Neo4jConnectionConfig{
+			URI:      "neo4j://custom:7687",
+			Username: "custom_user",
+			Password: "custom_password",
+			Database: "custom_db",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected validation to pass, got error: %v", err)
+	}
+	
+	// 验证指定的值被保留
+	resolved := cfg.ResolvedNeo4jConfig()
+	if resolved.URI != "neo4j://custom:7687" {
+		t.Errorf("expected URI 'neo4j://custom:7687', got '%s'", resolved.URI)
+	}
+	if resolved.Username != "custom_user" {
+		t.Errorf("expected username 'custom_user', got '%s'", resolved.Username)
+	}
+	if resolved.Database != "custom_db" {
+		t.Errorf("expected database 'custom_db', got '%s'", resolved.Database)
 	}
 }
 
