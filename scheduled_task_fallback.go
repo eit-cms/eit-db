@@ -20,11 +20,11 @@ type scheduledTaskRuntime struct {
 }
 
 type inProcessScheduledTaskManager struct {
-	mu       sync.RWMutex
-	repo     *Repository
+	mu        sync.RWMutex
+	repo      *Repository
 	scheduler *cron.Cron
-	tasks    map[string]*scheduledTaskRuntime
-	executor ScheduledTaskExecutor
+	tasks     map[string]*scheduledTaskRuntime
+	executor  ScheduledTaskExecutor
 }
 
 func newInProcessScheduledTaskManager(repo *Repository, executor ScheduledTaskExecutor) *inProcessScheduledTaskManager {
@@ -291,18 +291,5 @@ func cloneScheduledTaskConfig(task *ScheduledTaskConfig) *ScheduledTaskConfig {
 }
 
 func shouldUseScheduledTaskFallback(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "not supported") {
-		return true
-	}
-	if strings.Contains(msg, "not implemented") {
-		return true
-	}
-	if strings.Contains(msg, "not yet implemented") {
-		return true
-	}
-	return false
+	return IsScheduledTaskFallbackError(err)
 }

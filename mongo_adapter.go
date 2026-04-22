@@ -126,17 +126,17 @@ func (a *MongoAdapter) GetRawConn() interface{} {
 
 // RegisterScheduledTask MongoDB 暂不支持定时任务
 func (a *MongoAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
-	return fmt.Errorf("mongodb: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // UnregisterScheduledTask MongoDB 暂不支持定时任务
 func (a *MongoAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
-	return fmt.Errorf("mongodb: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // ListScheduledTasks MongoDB 暂不支持定时任务
 func (a *MongoAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	return nil, fmt.Errorf("mongodb: scheduled task not supported")
+	return nil, NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // GetQueryBuilderProvider 返回 MongoDB BSON Query Builder Provider。

@@ -1239,9 +1239,7 @@ func (r *Repository) UnregisterScheduledTask(ctx context.Context, taskName strin
 		return err
 	}
 
-	r.mu.RLock()
-	manager := r.fallbackTaskManager
-	r.mu.RUnlock()
+	manager := r.getOrCreateFallbackTaskManager()
 	if manager == nil {
 		return err
 	}
@@ -1276,6 +1274,7 @@ func (r *Repository) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskSt
 	if !shouldUseScheduledTaskFallback(err) {
 		return nil, err
 	}
+	manager = r.getOrCreateFallbackTaskManager()
 	if manager == nil {
 		return nil, err
 	}

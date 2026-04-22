@@ -141,17 +141,17 @@ func (a *Neo4jAdapter) GetRawConn() interface{} {
 
 // RegisterScheduledTask Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
-	return fmt.Errorf("neo4j: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // UnregisterScheduledTask Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
-	return fmt.Errorf("neo4j: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // ListScheduledTasks Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	return nil, fmt.Errorf("neo4j: scheduled task not supported")
+	return nil, NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // QueryCypher 执行读类型 Cypher，并返回记录列表。
