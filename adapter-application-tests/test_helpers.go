@@ -69,3 +69,39 @@ func sqlServerIntegrationConfig() *db.Config {
 		},
 	}
 }
+
+func redisIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "redis",
+		Redis: &db.RedisConnectionConfig{
+			URI:      getEnv("REDIS_URI", ""),
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     getEnvInt("REDIS_PORT", 6379),
+			Username: getEnv("REDIS_USERNAME", ""),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       getEnvInt("REDIS_DB", 0),
+		},
+	}
+}
+
+func mongoIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "mongodb",
+		MongoDB: &db.MongoConnectionConfig{
+			URI:      getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+			Database: getEnv("MONGODB_DATABASE", "testdb"),
+		},
+	}
+}
+
+func neo4jIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "neo4j",
+		Neo4j: &db.Neo4jConnectionConfig{
+			URI:      getEnv("NEO4J_URI", "neo4j://localhost:7687"),
+			Username: getEnv("NEO4J_USER", "neo4j"),
+			Password: getEnv("NEO4J_PASSWORD", "neo4j"),
+			Database: getEnv("NEO4J_DATABASE", "neo4j"),
+		},
+	}
+}

@@ -1724,7 +1724,7 @@ go test ./... -v
 
 ### 集成测试
 
-测试所有适配器（SQLite 无需依赖，PostgreSQL/MySQL 需要 Docker）：
+测试所有适配器（SQLite 无需依赖；PostgreSQL/MySQL/SQL Server/Redis/MongoDB/Neo4j 需对应实例）：
 
 ```bash
 # 仅 SQLite 测试（推荐开发期间使用）
@@ -1740,7 +1740,7 @@ go test ./adapter-application-tests -v
 ### 使用 Docker 运行完整测试
 
 ```bash
-# 启动 PostgreSQL、MySQL、SQL Server 容器
+# 启动 PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j 容器
 ./test.sh start
 
 # 运行所有测试
@@ -1764,7 +1764,10 @@ go test ./adapter-application-tests -v
 - ✅ QueryFeatures：版本感知、优先级路由、特性声明
 - ⏭️ PostgreSQL：物化视图、数组、全文搜索、JSONB
 - ⏭️ MySQL：全文搜索、JSON、窗口函数、ON DUPLICATE KEY
-- ⏭️ SQL Server：MERGE、递归 CTE、临时表
+- ✅ SQL Server：基础迁移与动态表/特性 E2E 覆盖
+- ✅ Redis：基础读写与订阅能力集成覆盖
+- ✅ MongoDB：基础文档读写集成覆盖
+- ✅ Neo4j：基础图写入/查询/删除集成覆盖
 
 ## 📝 许可证
 

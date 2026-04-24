@@ -13,6 +13,10 @@
 - `sqlite_integration_test.go` - SQLite适配器集成测试（无依赖，可直接运行）
 - `postgres_integration_test.go` - PostgreSQL适配器集成测试（需要PostgreSQL实例）
 - `mysql_integration_test.go` - MySQL适配器集成测试（需要MySQL实例）
+- `sqlserver_integration_test.go` - SQL Server 适配器集成测试（需要 SQL Server 实例）
+- `redis_integration_test.go` - Redis 适配器集成测试（需要 Redis 实例）
+- `mongo_integration_test.go` - MongoDB 适配器集成测试（需要 MongoDB 实例）
+- `neo4j_integration_test.go` - Neo4j 适配器集成测试（需要 Neo4j 实例）
 
 ## SQLite测试
 
@@ -136,12 +140,12 @@ go test -v -run MySQL
 go test -v
 ```
 
-### SQLite + PostgreSQL + MySQL
+### 多后端（SQLite + PostgreSQL + MySQL + SQL Server + Redis + MongoDB + Neo4j）
 
 首先启动所有数据库容器，然后：
 
 ```bash
-# 使用docker-compose
+# 使用 docker-compose（按你的本地 compose 文件）
 docker-compose up -d
 
 # 设置环境变量
@@ -233,7 +237,7 @@ MYSQL_DSN=testuser:testpass@tcp(localhost:3306)/testdb
 
 ## 测试设计原则
 
-1. **逐数据库增进**：从SQLite开始，逐步支持PostgreSQL、MySQL等
+1. **逐数据库增进**：从SQLite开始，逐步支持PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j
 2. **功能覆盖**：覆盖QueryFeatures中声明的所有特性
 3. **版本敏感**：标记每个特性的最小版本要求
 4. **错误处理**：处理环境配置缺失时的skip行为
@@ -241,8 +245,10 @@ MYSQL_DSN=testuser:testpass@tcp(localhost:3306)/testdb
 
 ## 待办事项
 
-- [ ] SQL Server适配器集成测试
-- [ ] MongoDB适配器集成测试
+- [x] SQL Server适配器集成测试
+- [x] MongoDB适配器集成测试
+- [x] Redis适配器集成测试
+- [x] Neo4j适配器集成测试
 - [ ] 性能基准测试
 - [ ] 并发访问测试
 - [ ] 连接池测试
