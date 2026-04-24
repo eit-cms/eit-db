@@ -212,6 +212,11 @@ func (c *CompiledQueryCache) stats() CompiledQueryCacheStats {
 }
 
 // GetCompiledQuery 从缓存读取已编译查询。
+//
+// Deprecated: 编译缓存 API 仅缓存 SQL 文本，每次执行仍会访问数据库。
+// 如需缓存查询结果（完全跳过数据库），请使用 ExecuteQueryConstructorCached。
+// 编译缓存公共 API（GetCompiledQuery、StoreCompiledQuery、BuildAndCacheQuery 等）
+// 将在下一个主版本中移除，届时相关兼容层也将一并删除。
 func (r *Repository) GetCompiledQuery(cacheKey string) (*CompiledQuery, bool) {
 	r.mu.RLock()
 	cache := r.compiledQueryCache
@@ -228,6 +233,8 @@ func (r *Repository) GetCompiledQuery(cacheKey string) (*CompiledQuery, bool) {
 }
 
 // StoreCompiledQuery 手动写入一条编译查询到缓存。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) StoreCompiledQuery(cacheKey string, query string, args ...interface{}) error {
 	if cacheKey == "" {
 		return fmt.Errorf("cache key cannot be empty")
@@ -287,6 +294,9 @@ func (r *Repository) GetCompiledQueryCacheStats() CompiledQueryCacheStats {
 
 // BuildAndCacheQuery 编译查询并缓存；命中缓存时直接返回。
 // 返回值 cacheHit=true 表示直接复用缓存，无需再次 Build。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
+// 替代方案：使用 ExecuteQueryConstructorCached，可同时缓存编译结果与查询行数据。
 func (r *Repository) BuildAndCacheQuery(ctx context.Context, cacheKey string, constructor QueryConstructor) (query string, args []interface{}, cacheHit bool, err error) {
 	if cacheKey == "" {
 		return "", nil, false, fmt.Errorf("cache key cannot be empty")
@@ -310,6 +320,8 @@ func (r *Repository) BuildAndCacheQuery(ctx context.Context, cacheKey string, co
 }
 
 // GetCompiledQueryTemplate 从缓存读取查询模板。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) GetCompiledQueryTemplate(cacheKey string) (*CompiledQueryTemplate, bool) {
 	r.mu.RLock()
 	cache := r.compiledQueryCache
@@ -326,6 +338,8 @@ func (r *Repository) GetCompiledQueryTemplate(cacheKey string) (*CompiledQueryTe
 }
 
 // StoreCompiledQueryTemplate 手动写入一条查询模板到缓存。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) StoreCompiledQueryTemplate(cacheKey string, query string, argCount int) error {
 	if cacheKey == "" {
 		return fmt.Errorf("cache key cannot be empty")
@@ -351,6 +365,8 @@ func (r *Repository) StoreCompiledQueryTemplate(cacheKey string, query string, a
 
 // BuildAndCacheQueryTemplate 编译查询模板并缓存；命中缓存时直接返回模板。
 // 与 BuildAndCacheQuery 的区别是该 API 不缓存具体参数值，仅缓存 query 文本和参数位个数。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) BuildAndCacheQueryTemplate(ctx context.Context, cacheKey string, constructor QueryConstructor) (query string, argCount int, cacheHit bool, err error) {
 	if cacheKey == "" {
 		return "", 0, false, fmt.Errorf("cache key cannot be empty")
@@ -375,6 +391,8 @@ func (r *Repository) BuildAndCacheQueryTemplate(ctx context.Context, cacheKey st
 }
 
 // QueryWithCachedTemplate 使用缓存模板执行查询。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) QueryWithCachedTemplate(ctx context.Context, cacheKey string, args ...interface{}) (*sql.Rows, error) {
 	tpl, ok := r.GetCompiledQueryTemplate(cacheKey)
 	if !ok {
@@ -387,6 +405,8 @@ func (r *Repository) QueryWithCachedTemplate(ctx context.Context, cacheKey strin
 }
 
 // QueryRowWithCachedTemplate 使用缓存模板执行单行查询。
+//
+// Deprecated: 见 GetCompiledQuery 的说明。将在下一个主版本中移除。
 func (r *Repository) QueryRowWithCachedTemplate(ctx context.Context, cacheKey string, args ...interface{}) (*sql.Row, error) {
 	tpl, ok := r.GetCompiledQueryTemplate(cacheKey)
 	if !ok {
