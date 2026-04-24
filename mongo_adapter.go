@@ -1820,5 +1820,5 @@ func (f *MongoFactory) Create(config *Config) (Adapter, error) {
 }
 
 func init() {
-	RegisterAdapter(&MongoFactory{})
+	MustRegisterAdapterDescriptor("mongodb", newMongoAdapterDescriptor())
 }

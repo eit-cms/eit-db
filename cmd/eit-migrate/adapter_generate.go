@@ -347,7 +347,31 @@ func (a *%s) GetQueryFeatures() *db.QueryFeatures {
 }
 
 func init() {
-	_ = db.RegisterAdapterConstructor("%s", New%s)
+	db.MustRegisterAdapterDescriptor("%s", db.AdapterDescriptor{
+		Factory: func(cfg *db.Config) (db.Adapter, error) {
+			adapter, err := New%s(cfg)
+			if err != nil {
+				return nil, err
+			}
+			if err := adapter.Connect(context.Background(), cfg); err != nil {
+				return nil, err
+			}
+			return adapter, nil
+		},
+		ValidateConfig: func(cfg *db.Config) error {
+			return nil // TODO: validate your adapter-specific config fields here
+		},
+		DefaultConfig: func() *db.Config {
+			return &db.Config{Adapter: "%s"} // TODO: provide adapter-specific defaults if needed
+		},
+		Metadata: func() db.AdapterMetadata {
+			return db.AdapterMetadata{
+				Name:       "%s",
+				DriverKind: "sql", // TODO: choose sql/document/graph/kv
+				Vendor:     "%s",
+			}
+		},
+	})
 }
 `, pkg, structName, structName,
 		structName, structName, structName,
@@ -368,7 +392,7 @@ func init() {
 		featureCtor,
 		structName,
 		queryFeatureCtor,
-		registerName, structName)
+		registerName, structName, registerName, registerName, registerName)
 
 	return tpl, nil
 }

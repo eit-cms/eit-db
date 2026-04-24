@@ -90,18 +90,10 @@ func InitDBFromAdapterRegistry(configPath, adapterName string) (*Repository, err
 	return repo, nil
 }
 
-// InitDBFromEnv 使用环境变量初始化数据库
-// 环境变量:
-//   DB_ADAPTER: 适配器类型 (sqlite/postgres/mysql)
-//   DB_PATH: SQLite 数据库文件路径
-//   DB_HOST: 数据库主机
-//   DB_PORT: 数据库端口
-//   DB_USER: 数据库用户名
-//   DB_PASSWORD: 数据库密码
-//   DB_NAME: 数据库名称
-//   DB_SSL_MODE: PostgreSQL SSL 模式
+// InitDBFromEnv 使用环境变量初始化数据库。
+//
+// Deprecated: 统一配置入口应通过 Config / NewConfig / LoadConfig 完成。
+// 本函数不会再实现，保留仅为显式提示旧接口已废弃，计划在下一个 minor 版本移除。
 func InitDBFromEnv() (*Repository, error) {
-	// 这个函数的具体实现取决于环境变量的使用
-	// 这里只是一个框架示例
-	return nil, fmt.Errorf("not implemented")
+	return nil, fmt.Errorf("InitDBFromEnv is deprecated; use Config/NewConfig/LoadConfig with NewRepository instead")
 }

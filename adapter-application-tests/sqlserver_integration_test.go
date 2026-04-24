@@ -9,17 +9,8 @@ import (
 )
 
 func setupSQLServerRepo(t *testing.T) (*db.Repository, func()) {
-	config, err := db.LoadConfigFromEnvWithDefaults("sqlserver", &db.Config{
-		Adapter: "sqlserver",
-		SQLServer: &db.SQLServerConnectionConfig{
-			Host:     "localhost",
-			Port:     1433,
-			Username: "sa",
-			Password: "Test@1234",
-			Database: "testdb",
-		},
-	})
-	if err != nil {
+	config := sqlServerIntegrationConfig()
+	if err := config.Validate(); err != nil {
 		t.Skipf("SQL Server 配置无效: %v", err)
 		return nil, nil
 	}

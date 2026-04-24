@@ -11,14 +11,14 @@ func TestNeo4jConfigValidationUsesDefaultValues(t *testing.T) {
 	// 测试：没有明确指定URI/Username/Database时，使用默认值
 	cfg := &Config{
 		Adapter: "neo4j",
-		Neo4j: &Neo4jConnectionConfig{
+		Neo4j:   &Neo4jConnectionConfig{
 			// 空配置 - 应该使用默认值
 		},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected validation to pass with default values, got error: %v", err)
 	}
-	
+
 	// 验证默认值已被设置
 	resolved := cfg.ResolvedNeo4jConfig()
 	if resolved.URI != "neo4j://localhost:7687" {
@@ -46,7 +46,7 @@ func TestNeo4jConfigValidationOverridesDefaultValues(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected validation to pass, got error: %v", err)
 	}
-	
+
 	// 验证指定的值被保留
 	resolved := cfg.ResolvedNeo4jConfig()
 	if resolved.URI != "neo4j://custom:7687" {
@@ -932,19 +932,19 @@ func TestNeo4jCustomFeatureSocialModelExecutor(t *testing.T) {
 	if payload["preset"] != "bidirectional_follow" {
 		t.Fatalf("expected bidirectional_follow preset, got %v", payload["preset"])
 	}
-	
+
 	// 验证constraints存在
 	constraints, ok := payload["constraints"].([]string)
 	if !ok || len(constraints) == 0 {
 		t.Fatalf("expected non-empty constraints, got %+v", payload["constraints"])
 	}
-	
+
 	// 验证sample_rules存在
 	rules, ok := payload["sample_rules"].(map[string]string)
 	if !ok || len(rules) == 0 {
 		t.Fatalf("expected non-empty sample_rules, got %+v", payload["sample_rules"])
 	}
-	
+
 	// 当execute=false时，不应有execution_results
 	if _, ok := payload["execution_results"]; ok {
 		t.Fatalf("expected no execution_results when execute=false, got %+v", payload["execution_results"])
@@ -954,7 +954,7 @@ func TestNeo4jCustomFeatureSocialModelExecutor(t *testing.T) {
 func TestNeo4jCustomFeatureSocialModelExecutorAllPresets(t *testing.T) {
 	a := &Neo4jAdapter{}
 	presets := []string{"bidirectional_follow", "friendship", "forum_post", "one_to_one_chat", "group_chat_room", "chat_receipt", "chat_moderation", "message_emoji"}
-	
+
 	for _, preset := range presets {
 		out, err := a.ExecuteCustomFeature(context.Background(), "social_model_executor", map[string]interface{}{
 			"preset":  preset,
@@ -970,7 +970,7 @@ func TestNeo4jCustomFeatureSocialModelExecutorAllPresets(t *testing.T) {
 		if payload["preset"] != preset {
 			t.Fatalf("expected preset %s, got %v", preset, payload["preset"])
 		}
-		
+
 		// 验证constraints和rules
 		constraints, ok := payload["constraints"].([]string)
 		if !ok || len(constraints) == 0 {

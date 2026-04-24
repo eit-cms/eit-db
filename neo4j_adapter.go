@@ -828,5 +828,5 @@ func (f *Neo4jFactory) Create(config *Config) (Adapter, error) {
 
 // init 自动注册 Neo4j 适配器。
 func init() {
-	RegisterAdapter(&Neo4jFactory{})
+	MustRegisterAdapterDescriptor("neo4j", newNeo4jAdapterDescriptor())
 }

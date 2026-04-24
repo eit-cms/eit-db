@@ -305,5 +305,5 @@ func (a *SQLiteAdapter) GetQueryFeatures() *QueryFeatures {
 
 // init 自动注册 SQLite 适配器
 func init() {
-	_ = RegisterAdapterConstructor("sqlite", NewSQLiteAdapter)
+	MustRegisterAdapterDescriptor("sqlite", newSQLiteAdapterDescriptor())
 }

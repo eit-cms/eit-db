@@ -8,17 +8,8 @@ import (
 )
 
 func setupMySQLRepo(t *testing.T) (*db.Repository, func()) {
-	config, err := db.LoadConfigFromEnvWithDefaults("mysql", &db.Config{
-		Adapter: "mysql",
-		MySQL: &db.MySQLConnectionConfig{
-			Host:     "localhost",
-			Port:     3306,
-			Username: "testuser",
-			Password: "testpass",
-			Database: "testdb",
-		},
-	})
-	if err != nil {
+	config := mysqlIntegrationConfig()
+	if err := config.Validate(); err != nil {
 		t.Skipf("MySQL 配置无效: %v", err)
 		return nil, nil
 	}

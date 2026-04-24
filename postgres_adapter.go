@@ -920,5 +920,5 @@ func (a *PostgreSQLAdapter) GetQueryFeatures() *QueryFeatures {
 
 // init 自动注册 PostgreSQL 适配器
 func init() {
-	RegisterAdapter(&PostgreSQLFactory{})
+	MustRegisterAdapterDescriptor("postgres", newPostgresAdapterDescriptor())
 }

@@ -8,6 +8,37 @@ import (
 	"testing"
 )
 
+type routingHookTestAdapter struct{}
+
+func (a *routingHookTestAdapter) Connect(ctx context.Context, config *Config) error { return nil }
+func (a *routingHookTestAdapter) Close() error                                       { return nil }
+func (a *routingHookTestAdapter) Ping(ctx context.Context) error                     { return nil }
+func (a *routingHookTestAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, error) {
+	return nil, fmt.Errorf("not supported")
+}
+func (a *routingHookTestAdapter) Query(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return nil, fmt.Errorf("not supported")
+}
+func (a *routingHookTestAdapter) QueryRow(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return &sql.Row{}
+}
+func (a *routingHookTestAdapter) Exec(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return nil, fmt.Errorf("not supported")
+}
+func (a *routingHookTestAdapter) GetRawConn() interface{} { return nil }
+func (a *routingHookTestAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
+	return fmt.Errorf("not supported")
+}
+func (a *routingHookTestAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
+	return fmt.Errorf("not supported")
+}
+func (a *routingHookTestAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
+	return nil, nil
+}
+func (a *routingHookTestAdapter) GetQueryBuilderProvider() QueryConstructorProvider { return nil }
+func (a *routingHookTestAdapter) GetDatabaseFeatures() *DatabaseFeatures            { return nil }
+func (a *routingHookTestAdapter) GetQueryFeatures() *QueryFeatures                  { return nil }
+
 func TestExecuteQueryConstructorSQLite(t *testing.T) {
 	cfg := &Config{
 		Adapter: "sqlite",
@@ -225,6 +256,45 @@ func TestExecuteQueryConstructorAutoSQLiteQuery(t *testing.T) {
 	}
 	if len(result.Rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+}
+
+func TestExecuteQueryConstructorAutoCustomDescriptorHook(t *testing.T) {
+	adapterName := "custom_hook_exec"
+
+	MustRegisterAdapterDescriptor(adapterName, AdapterDescriptor{
+		Factory: func(cfg *Config) (Adapter, error) {
+			return &routingHookTestAdapter{}, nil
+		},
+		ValidateConfig: func(cfg *Config) error { return nil },
+		ExecuteQueryConstructorAuto: func(ctx context.Context, adapter Adapter, query string, args []interface{}) (*QueryConstructorAutoExecutionResult, bool, error) {
+			return &QueryConstructorAutoExecutionResult{
+				Mode:      "query",
+				Statement: query,
+				Args:      copyQueryArgs(args),
+				Rows:      []map[string]interface{}{{"source": "descriptor_hook"}},
+			}, true, nil
+		},
+	})
+
+	repo, err := NewRepository(&Config{Adapter: adapterName})
+	if err != nil {
+		t.Fatalf("create custom repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	q := NewSQLQueryConstructor(NewBaseSchema("users"), NewSQLiteDialect())
+	q.Select("id").Where(Eq("name", "alice"))
+
+	result, err := repo.ExecuteQueryConstructorAuto(context.Background(), q)
+	if err != nil {
+		t.Fatalf("execute via descriptor hook failed: %v", err)
+	}
+	if result == nil || len(result.Rows) != 1 {
+		t.Fatalf("expected one row routed by descriptor hook, got %+v", result)
+	}
+	if result.Rows[0]["source"] != "descriptor_hook" {
+		t.Fatalf("unexpected hook payload: %+v", result.Rows[0])
 	}
 }
 

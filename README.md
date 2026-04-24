@@ -21,6 +21,93 @@
 go get github.com/eit-cms/eit-db
 ```
 
+## Adapter 注册机制
+
+自定义适配器现在优先使用描述符注册机制。一个适配器的创建、专属配置校验和默认配置应通过一次 `RegisterAdapterDescriptor` 或 `MustRegisterAdapterDescriptor` 完成，而不是分散修改框架内部 switch/case。
+
+```go
+func init() {
+    db.MustRegisterAdapterDescriptor("mydb", db.AdapterDescriptor{
+        Factory: func(cfg *db.Config) (db.Adapter, error) {
+            adapter, err := NewMyAdapter(cfg)
+            if err != nil {
+                return nil, err
+            }
+            if err := adapter.Connect(context.Background(), cfg); err != nil {
+                return nil, err
+            }
+            return adapter, nil
+        },
+        ValidateConfig: func(cfg *db.Config) error {
+            return nil
+        },
+        DefaultConfig: func() *db.Config {
+            return &db.Config{Adapter: "mydb"}
+        },
+    })
+}
+```
+
+旧版 `RegisterAdapter` 和 `RegisterAdapterConstructor` 仍然保留为兼容层，并会自动桥接到描述符注册表，避免已有代码立即失效。
+
+注意：旧版兼容层计划在下一个 minor 版本移除。新代码应优先使用描述符注册机制。
+
+## Adapter Metadata 最佳实践
+
+从 v1.1 起，框架支持统一的 Adapter 元信息解析，推荐第三方适配器在描述符中显式提供 `Metadata`，避免运行时依赖类型推断。
+
+```go
+func init() {
+    db.MustRegisterAdapterDescriptor("mydb", db.AdapterDescriptor{
+        Factory: func(cfg *db.Config) (db.Adapter, error) {
+            adapter, err := NewMyAdapter(cfg)
+            if err != nil {
+                return nil, err
+            }
+            if err := adapter.Connect(context.Background(), cfg); err != nil {
+                return nil, err
+            }
+            return adapter, nil
+        },
+        ValidateConfig: func(cfg *db.Config) error {
+            return nil
+        },
+        DefaultConfig: func() *db.Config {
+            return &db.Config{Adapter: "mydb"}
+        },
+        Metadata: func() db.AdapterMetadata {
+            return db.AdapterMetadata{
+                Name:       "mydb",
+                DriverKind: "document", // sql | document | graph | kv
+                Vendor:     "acme",
+                Version:    "1.x",
+                Aliases:    []string{"acme-db"},
+            }
+        },
+    })
+}
+```
+
+如果你只拿到 Adapter 实例，也可以通过公开 API 获取统一元信息：
+
+```go
+meta := db.ResolveAdapterMetadata("", adapter)
+fmt.Println(meta.Name)
+```
+
+如果你在 Repository 上下文中，直接使用：
+
+```go
+meta := repo.GetAdapterMetadata()
+fmt.Println(meta.Name)
+```
+
+## 配置入口约定
+
+EIT-DB 现在明确采用统一配置入口：新代码应通过 `Config`、`NewConfig`、`LoadConfig` 或适配器注册表提供配置，而不是再引入额外的环境变量配置入口。
+
+`LoadConfigFromEnv`、`LoadConfigFromEnvWithDefaults` 和 `InitDBFromEnv` 仅作为旧版兼容层保留，不再扩展新适配器特性，计划在下一个 minor 版本移除。
+
 ### v1.1.2 - 定时任务增强与回退可观测性升级 (2026-04-22)
 
 **核心变化**：补齐 SQL 适配器原生调度路径与统一 fallback reason 可观测性，提升跨适配器任务调度稳定性

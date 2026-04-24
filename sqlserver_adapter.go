@@ -955,5 +955,5 @@ func (a *SQLServerAdapter) GetQueryFeatures() *QueryFeatures {
 
 // init 自动注册 SQL Server 适配器
 func init() {
-	RegisterAdapter(&SQLServerFactory{})
+	MustRegisterAdapterDescriptor("sqlserver", newSQLServerAdapterDescriptor())
 }

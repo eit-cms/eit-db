@@ -11,6 +11,56 @@ eit-db-cli 是当前主命令入口，提供灵活的数据库迁移工具能力
 - `eit-migrate` 作为历史别名继续兼容。
 - 新功能将优先并持续在 `eit-db-cli` 下演进，旧别名仅保证兼容可用。
 
+## 自定义 Adapter 注册迁移（v1.1+）
+
+如果你维护的是第三方适配器，建议从旧式注册迁移到描述符注册，并显式声明 Metadata。
+
+推荐迁移步骤：
+
+1. 将 `RegisterAdapter` / `RegisterAdapterConstructor` 替换为 `MustRegisterAdapterDescriptor`
+2. 将配置校验逻辑收敛到 `ValidateConfig`
+3. 将默认配置收敛到 `DefaultConfig`
+4. 增加 `Metadata`，声明 name/driverKind/vendor/version
+
+示例：
+
+```go
+func init() {
+    db.MustRegisterAdapterDescriptor("mydb", db.AdapterDescriptor{
+        Factory: func(cfg *db.Config) (db.Adapter, error) {
+            a, err := NewMyAdapter(cfg)
+            if err != nil {
+                return nil, err
+            }
+            if err := a.Connect(context.Background(), cfg); err != nil {
+                return nil, err
+            }
+            return a, nil
+        },
+        ValidateConfig: func(cfg *db.Config) error {
+            return nil
+        },
+        DefaultConfig: func() *db.Config {
+            return &db.Config{Adapter: "mydb"}
+        },
+        Metadata: func() db.AdapterMetadata {
+            return db.AdapterMetadata{
+                Name:       "mydb",
+                DriverKind: "sql", // sql | document | graph | kv
+                Vendor:     "acme",
+            }
+        },
+    })
+}
+```
+
+迁移后，你可以通过统一 API 读取元信息：
+
+```go
+meta := db.ResolveAdapterMetadata("", adapter)
+meta2 := repo.GetAdapterMetadata()
+```
+
 ## 快速开始
 
 ### 1. 初始化迁移项目

@@ -784,5 +784,5 @@ func (a *MySQLAdapter) GetQueryFeatures() *QueryFeatures {
 
 // init 自动注册 MySQL 适配器
 func init() {
-	RegisterAdapter(&MySQLFactory{})
+	MustRegisterAdapterDescriptor("mysql", newMySQLAdapterDescriptor())
 }

@@ -17,6 +17,14 @@ type mockStartupCapabilityAdapter struct {
 	fullTextErr    error
 }
 
+type metadataStartupCapabilityAdapter struct {
+	mockStartupCapabilityAdapter
+}
+
+func (m *metadataStartupCapabilityAdapter) Metadata() AdapterMetadata {
+	return AdapterMetadata{Name: "meta_startup_db", DriverKind: "document", Vendor: "custom"}
+}
+
 func (m *mockStartupCapabilityAdapter) Connect(ctx context.Context, config *Config) error { return nil }
 func (m *mockStartupCapabilityAdapter) Close() error                                      { return nil }
 func (m *mockStartupCapabilityAdapter) Ping(ctx context.Context) error                    { return nil }
@@ -108,6 +116,23 @@ func TestRunStartupCapabilityCheckStrictPasses(t *testing.T) {
 	}
 	if report.Checks[0].Status != "ok" {
 		t.Fatalf("expected ok status, got %s", report.Checks[0].Status)
+	}
+}
+
+func TestRunStartupCapabilityCheckReportUsesMetadataName(t *testing.T) {
+	repo := &Repository{adapter: &metadataStartupCapabilityAdapter{}}
+	report, err := repo.RunStartupCapabilityCheck(context.Background(), &StartupCapabilityConfig{
+		Mode:    "lenient",
+		Inspect: []string{StartupCapabilityJSONRuntime},
+	})
+	if err != nil {
+		t.Fatalf("expected capability check success, got error: %v", err)
+	}
+	if report == nil {
+		t.Fatal("expected non-nil startup capability report")
+	}
+	if report.Adapter != "meta_startup_db" {
+		t.Fatalf("expected adapter name meta_startup_db, got %q", report.Adapter)
 	}
 }
 
