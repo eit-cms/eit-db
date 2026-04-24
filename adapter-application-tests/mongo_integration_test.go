@@ -22,6 +22,10 @@ func setupMongoRepo(t *testing.T) (*db.Repository, *db.Config, func()) {
 		failIntegrationEnv(t, "MongoDB", err)
 	}
 
+	if err := repo.Connect(context.Background()); err != nil {
+		failIntegrationEnv(t, "MongoDB", err)
+	}
+
 	if err := repo.Ping(context.Background()); err != nil {
 		failIntegrationEnv(t, "MongoDB", err)
 	}

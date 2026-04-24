@@ -51,7 +51,9 @@ jobs:
           done
 
       - name: Run adapter integration tests
+        shell: bash
         run: |
+          set -euo pipefail
           cd adapter-application-tests
           go test ./... -v -count=1 2>&1 | tee /tmp/adapter-integration-test.log
 
