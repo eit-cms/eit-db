@@ -108,6 +108,7 @@ type Config struct {
 	SQLServer *SQLServerConnectionConfig `json:"sqlserver,omitempty" yaml:"sqlserver,omitempty"`
 	MongoDB   *MongoConnectionConfig     `json:"mongodb,omitempty" yaml:"mongodb,omitempty"`
 	Neo4j     *Neo4jConnectionConfig     `json:"neo4j,omitempty" yaml:"neo4j,omitempty"`
+	Redis     *RedisConnectionConfig     `json:"redis,omitempty" yaml:"redis,omitempty"`
 
 	// 旧的平铺字段仍保留为内部 fallback，便于仓库内逐步迁移。
 	// 新代码应优先写入上面的 adapter 专属子配置。
@@ -220,6 +221,30 @@ type MongoLogSystemConfig struct {
 	CustomHotWords map[string]int `json:"custom_hot_words,omitempty" yaml:"custom_hot_words,omitempty"`
 }
 
+// RedisConnectionConfig Redis 连接配置。
+type RedisConnectionConfig struct {
+	// URI 格式: redis://[:password@]host[:port][/db-number]
+	// 集群模式: redis://host1:port1,host2:port2,...
+	URI      string `json:"uri,omitempty" yaml:"uri,omitempty"`
+	Host     string `json:"host,omitempty" yaml:"host,omitempty"`
+	Port     int    `json:"port,omitempty" yaml:"port,omitempty"`
+	Username string `json:"username,omitempty" yaml:"username,omitempty"` // Redis ACL 用户名 (v6+)
+	Password string `json:"password,omitempty" yaml:"password,omitempty"`
+	DB       int    `json:"db,omitempty" yaml:"db,omitempty"` // Redis 数据库编号 0-15，默认 0
+
+	// TLS
+	TLSEnabled bool `json:"tls_enabled,omitempty" yaml:"tls_enabled,omitempty"`
+
+	// 集群模式
+	ClusterMode  bool     `json:"cluster_mode,omitempty" yaml:"cluster_mode,omitempty"`
+	ClusterAddrs []string `json:"cluster_addrs,omitempty" yaml:"cluster_addrs,omitempty"`
+
+	// 超时（秒），0 使用驱动默认值
+	DialTimeout  int `json:"dial_timeout,omitempty" yaml:"dial_timeout,omitempty"`
+	ReadTimeout  int `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
+	WriteTimeout int `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
+}
+
 // Neo4jConnectionConfig Neo4j 连接配置。
 type Neo4jConnectionConfig struct {
 	URI           string                    `json:"uri,omitempty" yaml:"uri,omitempty"`
@@ -297,8 +322,10 @@ type AdapterFactory interface {
 // Repository 数据库仓储对象 (类似 Ecto.Repo)
 type Repository struct {
 	adapter                 Adapter
+	adapterType             string
 	startupCapabilityReport *StartupCapabilityReport
 	compiledQueryCache      *CompiledQueryCache
+	resultCacheBackend      CacheBackend
 	scheduledTaskFallbackOn bool
 	fallbackTaskManager     *inProcessScheduledTaskManager
 	mu                      sync.RWMutex
@@ -312,11 +339,22 @@ var (
 	configRegistryMutex   sync.RWMutex
 )
 
-// RegisterAdapter 注册适配器工厂
-func RegisterAdapter(factory AdapterFactory) {
+func registerAdapterFactory(factory AdapterFactory) {
+	if factory == nil {
+		return
+	}
 	factoriesMutex.Lock()
 	defer factoriesMutex.Unlock()
-	adapterFactories[factory.Name()] = factory
+	adapterFactories[normalizeAdapterName(factory.Name())] = factory
+}
+
+// RegisterAdapter 注册适配器工厂。
+//
+// Deprecated: 这是旧版兼容层，优先使用 RegisterAdapterDescriptor 或
+// MustRegisterAdapterDescriptor。该兼容层计划在下一个 minor 版本移除。
+func RegisterAdapter(factory AdapterFactory) {
+	registerAdapterFactory(factory)
+	registerLegacyDescriptorShim(factory)
 }
 
 // adapterConstructorFactory 通过反射调用构造函数创建 Adapter
@@ -360,8 +398,11 @@ func (f *adapterConstructorFactory) Create(config *Config) (Adapter, error) {
 	return adapter, nil
 }
 
-// RegisterAdapterConstructor 使用构造函数动态注册 Adapter
+// RegisterAdapterConstructor 使用构造函数动态注册 Adapter。
 // 允许的构造函数签名：func(*Config) (Adapter, error) 或 func(*Config) (*T, error)
+//
+// Deprecated: 这是旧版兼容层，优先使用 RegisterAdapterDescriptor 或
+// MustRegisterAdapterDescriptor。该兼容层计划在下一个 minor 版本移除。
 func RegisterAdapterConstructor(name string, ctor interface{}) error {
 	if name == "" {
 		return fmt.Errorf("adapter name cannot be empty")
@@ -479,9 +520,11 @@ func NewRepository(config *Config) (*Repository, error) {
 
 	repo := &Repository{
 		adapter:                 adapter,
+		adapterType:             normalizeAdapterName(config.Adapter),
 		compiledQueryCache:      NewCompiledQueryCacheWithOptions(cacheSize, time.Duration(cacheTTLSeconds)*time.Second, cacheEnableMetrics),
 		scheduledTaskFallbackOn: config.ScheduledTaskFallbackEnabled(),
 	}
+	rememberAdapterConcreteType(adapter, repo.adapterType)
 	if config.StartupCapabilities != nil {
 		report, checkErr := repo.RunStartupCapabilityCheck(context.Background(), config.StartupCapabilities)
 		repo.startupCapabilityReport = report
@@ -705,7 +748,11 @@ func (r *Repository) ExecuteQueryConstructor(ctx context.Context, constructor Qu
 }
 
 // ExecuteQueryConstructorWithCache 执行 QueryConstructor，并在编译阶段接入缓存。
-// 返回 cacheHit=true 表示复用了已缓存的编译结果。
+// 返回 cacheHit=true 表示复用了已缓存的编译结果（SQL 文本），每次执行仍会访问数据库。
+//
+// Deprecated: 此方法仅缓存编译后的 SQL 文本（L1 Ristretto）而非查询结果。
+// 如需缓存实际行数据（命中时完全跳过数据库），请使用 ExecuteQueryConstructorCached。
+// 本方法及对应的分页变体（ExecuteQueryConstructorPagedWithCache 等）将在下一个主版本中移除。
 func (r *Repository) ExecuteQueryConstructorWithCache(ctx context.Context, cacheKey string, constructor QueryConstructor) (*QueryConstructorExecutionResult, bool, error) {
 	if constructor == nil {
 		return nil, false, fmt.Errorf("query constructor cannot be nil")
@@ -733,6 +780,9 @@ func (r *Repository) ExecuteQueryConstructorPaged(ctx context.Context, construct
 }
 
 // ExecuteQueryConstructorPagedWithCache 执行分页查询，并为分页查询与 count 查询接入编译缓存。
+//
+// Deprecated: 见 ExecuteQueryConstructorWithCache 的说明。将在下一个主版本中移除。
+// 替代方案：使用 ExecuteQueryConstructorPagedCached。
 func (r *Repository) ExecuteQueryConstructorPagedWithCache(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, page int, pageSize int) (*PagedQueryConstructorExecutionResult, error) {
 	if strings.TrimSpace(cacheKeyPrefix) == "" {
 		return nil, fmt.Errorf("cache key prefix cannot be empty")
@@ -747,6 +797,9 @@ func (r *Repository) ExecuteQueryConstructorPaginated(ctx context.Context, const
 }
 
 // ExecuteQueryConstructorPaginatedWithCache 使用统一分页语义执行查询，并为分页查询与 count 查询接入编译缓存。
+//
+// Deprecated: 见 ExecuteQueryConstructorWithCache 的说明。将在下一个主版本中移除。
+// 替代方案：使用 ExecuteQueryConstructorPaginatedCached。
 func (r *Repository) ExecuteQueryConstructorPaginatedWithCache(ctx context.Context, cacheKeyPrefix string, constructor QueryConstructor, builder *PaginationBuilder) (*PagedQueryConstructorExecutionResult, error) {
 	if strings.TrimSpace(cacheKeyPrefix) == "" {
 		return nil, fmt.Errorf("cache key prefix cannot be empty")
@@ -915,6 +968,11 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 	if adapter == nil {
 		return nil, fmt.Errorf("adapter is not initialized")
 	}
+	if descriptor, ok := r.resolveExecutionDescriptor(adapter); ok && descriptor.ExecuteQueryConstructorAuto != nil {
+		if routed, handled, hookErr := descriptor.ExecuteQueryConstructorAuto(ctx, adapter, query, args); handled {
+			return routed, hookErr
+		}
+	}
 
 	if neo, ok := adapter.(*Neo4jAdapter); ok {
 		if looksLikeReadCypher(query) {
@@ -984,6 +1042,31 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 		return nil, fmt.Errorf("mongodb query constructor requires compiled plan prefix %q or %q", mongoCompiledQueryPrefix, mongoCompiledWritePrefix)
 	}
 
+	if redisAdapter, ok := adapter.(*RedisAdapter); ok {
+		trimmed := strings.TrimSpace(query)
+		if strings.HasPrefix(trimmed, redisCompiledCommandPrefix) {
+			rows, execSummary, redisErr := redisAdapter.ExecuteCompiledCommandPlan(ctx, query)
+			if redisErr != nil {
+				return nil, redisErr
+			}
+			if rows != nil {
+				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+			}
+			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyQueryArgs(args), Exec: execSummary}, nil
+		}
+		if strings.HasPrefix(trimmed, redisCompiledPipelinePrefix) {
+			rows, execSummary, redisErr := redisAdapter.ExecuteCompiledPipelinePlan(ctx, query)
+			if redisErr != nil {
+				return nil, redisErr
+			}
+			if rows != nil {
+				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+			}
+			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyQueryArgs(args), Exec: execSummary}, nil
+		}
+		return nil, fmt.Errorf("redis query constructor requires compiled plan prefix %q or %q", redisCompiledCommandPrefix, redisCompiledPipelinePrefix)
+	}
+
 	if looksLikeReadSQL(query) {
 		sqlRows, queryErr := r.Query(ctx, query, args...)
 		if queryErr != nil {
@@ -1040,6 +1123,11 @@ func (r *Repository) executeCompiledQueryStatement(ctx context.Context, query st
 	if adapter == nil {
 		return nil, fmt.Errorf("adapter is not initialized")
 	}
+	if descriptor, ok := r.resolveExecutionDescriptor(adapter); ok && descriptor.ExecuteQueryConstructor != nil {
+		if routed, handled, hookErr := descriptor.ExecuteQueryConstructor(ctx, adapter, query, args); handled {
+			return routed, hookErr
+		}
+	}
 
 	if neo, ok := adapter.(*Neo4jAdapter); ok {
 		rows, queryErr := neo.QueryCypher(ctx, query, buildCypherParamsFromArgs(args))
@@ -1064,6 +1152,31 @@ func (r *Repository) executeCompiledQueryStatement(ctx context.Context, query st
 		return nil, fmt.Errorf("mongodb query constructor requires compiled plan prefix %q", mongoCompiledQueryPrefix)
 	}
 
+	if redisAdapter, ok := adapter.(*RedisAdapter); ok {
+		trimmed := strings.TrimSpace(query)
+		if strings.HasPrefix(trimmed, redisCompiledCommandPrefix) {
+			rows, execSummary, redisErr := redisAdapter.ExecuteCompiledCommandPlan(ctx, query)
+			if redisErr != nil {
+				return nil, redisErr
+			}
+			if execSummary != nil {
+				return nil, fmt.Errorf("ExecuteQueryConstructor is query-only for redis write plans; use ExecuteQueryConstructorAuto")
+			}
+			return &QueryConstructorExecutionResult{Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+		}
+		if strings.HasPrefix(trimmed, redisCompiledPipelinePrefix) {
+			rows, execSummary, redisErr := redisAdapter.ExecuteCompiledPipelinePlan(ctx, query)
+			if redisErr != nil {
+				return nil, redisErr
+			}
+			if execSummary != nil {
+				return nil, fmt.Errorf("ExecuteQueryConstructor is query-only for redis write pipeline plans; use ExecuteQueryConstructorAuto")
+			}
+			return &QueryConstructorExecutionResult{Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+		}
+		return nil, fmt.Errorf("redis query constructor requires compiled plan prefix %q", redisCompiledCommandPrefix)
+	}
+
 	sqlRows, queryErr := r.Query(ctx, query, args...)
 	if queryErr != nil {
 		return nil, queryErr
@@ -1076,6 +1189,14 @@ func (r *Repository) executeCompiledQueryStatement(ctx context.Context, query st
 	}
 
 	return &QueryConstructorExecutionResult{Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+}
+
+func (r *Repository) resolveExecutionDescriptor(adapter Adapter) (AdapterDescriptor, bool) {
+	if descriptor, ok := LookupAdapterDescriptor(r.adapterType); ok {
+		return descriptor, true
+	}
+	metadata := r.resolveAdapterMetadata(adapter)
+	return LookupAdapterDescriptor(metadata.Name)
 }
 
 func buildCypherParamsFromArgs(args []interface{}) map[string]interface{} {

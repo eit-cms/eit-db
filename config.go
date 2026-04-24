@@ -296,6 +296,41 @@ func (c *Config) ResolvedNeo4jConfig() *Neo4jConnectionConfig {
 	return resolved
 }
 
+// ResolvedRedisConfig 返回 Redis 的有效配置。
+func (c *Config) ResolvedRedisConfig() *RedisConnectionConfig {
+	resolved := &RedisConnectionConfig{}
+	if c != nil && c.Redis != nil {
+		*resolved = *c.Redis
+		if c.Redis.ClusterAddrs != nil {
+			resolved.ClusterAddrs = append([]string(nil), c.Redis.ClusterAddrs...)
+		}
+	}
+	if resolved.URI == "" {
+		if uri, _ := c.Options["uri"].(string); strings.TrimSpace(uri) != "" {
+			resolved.URI = strings.TrimSpace(uri)
+		}
+	}
+	if resolved.Host == "" {
+		resolved.Host = c.Host
+	}
+	if resolved.Port == 0 {
+		resolved.Port = c.Port
+	}
+	if resolved.Password == "" {
+		resolved.Password = c.Password
+	}
+	// 默认值：集群模式不设置 host/port 默认值
+	if !resolved.ClusterMode {
+		if resolved.Host == "" {
+			resolved.Host = "localhost"
+		}
+		if resolved.Port == 0 {
+			resolved.Port = 6379
+		}
+	}
+	return resolved
+}
+
 // resolvedNeo4jSocialNetworkConfig 返回补全默认值后的社交网络配置。
 func resolvedNeo4jSocialNetworkConfig(src *Neo4jSocialNetworkConfig) *Neo4jSocialNetworkConfig {
 	cfg := &Neo4jSocialNetworkConfig{}
@@ -388,18 +423,25 @@ func resolvedNeo4jSocialNetworkConfig(src *Neo4jSocialNetworkConfig) *Neo4jSocia
 
 // LoadConfigFromEnv 按 adapter 从环境变量加载数据库配置。
 //
-// 支持的环境变量：
+// Deprecated: 统一配置入口应通过 Config / NewConfig / LoadConfig 完成，环境变量加载仅作为旧版兼容层保留。
+// 该兼容层不再扩展新能力，计划在下一个 minor 版本移除。
+//
+// 现存支持的环境变量：
 // - PostgreSQL: POSTGRES_DSN 或 POSTGRES_HOST/PORT/USER/PASSWORD/DB/SSLMODE
 // - MySQL: MYSQL_DSN 或 MYSQL_HOST/PORT/USER/PASSWORD/DB
 // - SQL Server: SQLSERVER_DSN 或 SQLSERVER_HOST/PORT/USER/PASSWORD/DB
 // - SQLite: SQLITE_DATABASE 或 SQLITE_PATH
 // - MongoDB: MONGODB_URI + MONGODB_DATABASE/MONGODB_DB
+// - Redis: REDIS_URI 或 REDIS_HOST/PORT/PASSWORD/DB
 func LoadConfigFromEnv(adapter string) (*Config, error) {
 	return LoadConfigFromEnvWithDefaults(adapter, nil)
 }
 
 // LoadConfigFromEnvWithDefaults 按 adapter 从环境变量加载数据库配置，并允许通过 defaults 指定默认值。
 // 环境变量优先级高于 defaults；若设置了 *_DSN，则直接使用 DSN 连接细节。
+//
+// Deprecated: 统一配置入口应通过 Config / NewConfig / LoadConfig 完成，环境变量加载仅作为旧版兼容层保留。
+// 该兼容层不再扩展新能力，计划在下一个 minor 版本移除。
 func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, error) {
 	normalized := strings.ToLower(strings.TrimSpace(adapter))
 	if normalized == "" {
@@ -578,6 +620,25 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 		}
 		config.Neo4j = resolved
 
+	case "redis":
+		resolved := config.ResolvedRedisConfig()
+		resolved.URI = preferEnvString(firstNonEmptyEnv("REDIS_URI"), resolved.URI, "")
+		resolved.Host = preferEnvString(firstNonEmptyEnv("REDIS_HOST"), resolved.Host, "localhost")
+		resolved.Port = preferEnvInt(firstNonEmptyEnv("REDIS_PORT"), resolved.Port, 6379)
+		resolved.Password = preferEnvString(firstNonEmptyEnv("REDIS_PASSWORD"), resolved.Password, "")
+		resolved.Username = preferEnvString(firstNonEmptyEnv("REDIS_USERNAME", "REDIS_USER"), resolved.Username, "")
+		if v := strings.TrimSpace(firstNonEmptyEnv("REDIS_DB")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				resolved.DB = parsed
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("REDIS_TLS_ENABLED")); v != "" {
+			if parsed, err := strconv.ParseBool(v); err == nil {
+				resolved.TLSEnabled = parsed
+			}
+		}
+		config.Redis = resolved
+
 	default:
 		return nil, fmt.Errorf("unsupported adapter: %s", normalized)
 	}
@@ -656,6 +717,13 @@ func cloneConfig(src *Config) *Config {
 		}
 		clone.Neo4j = &neo4jCfg
 	}
+	if src.Redis != nil {
+		redisCfg := *src.Redis
+		if src.Redis.ClusterAddrs != nil {
+			redisCfg.ClusterAddrs = append([]string(nil), src.Redis.ClusterAddrs...)
+		}
+		clone.Redis = &redisCfg
+	}
 	return &clone
 }
 
@@ -722,14 +790,6 @@ func preferEnvBool(envValue string, currentValue, fallback bool) bool {
 		return true
 	}
 	return fallback
-}
-
-func hasDSNOption(config *Config) bool {
-	if config == nil || config.Options == nil {
-		return false
-	}
-	dsn, _ := config.Options["dsn"].(string)
-	return strings.TrimSpace(dsn) != ""
 }
 
 // LoadConfig 从文件加载数据库配置（支持 JSON 和 YAML 格式）
@@ -910,78 +970,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("adapter must be specified")
 	}
 
-	switch c.Adapter {
-	case "sqlite":
-		sqliteCfg := c.ResolvedSQLiteConfig()
-		if strings.TrimSpace(sqliteCfg.Path) == "" && strings.TrimSpace(sqliteCfg.DSN) == "" {
-			return fmt.Errorf("sqlite: database path must be specified")
-		}
-
-	case "postgres", "mysql", "sqlserver":
-		var hasDSN bool
-		var host, username, database string
-		if c.Adapter == "postgres" {
-			cfg := c.ResolvedPostgresConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.Postgres = cfg
-		} else if c.Adapter == "mysql" {
-			cfg := c.ResolvedMySQLConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.MySQL = cfg
-		} else {
-			cfg := c.ResolvedSQLServerConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.SQLServer = cfg
-			if cfg.ManyToManyStrategy != "direct_join" && cfg.ManyToManyStrategy != "recursive_cte" {
-				return fmt.Errorf("sqlserver: many_to_many_strategy must be direct_join or recursive_cte")
-			}
-			if cfg.RecursiveCTEDepth <= 0 {
-				return fmt.Errorf("sqlserver: recursive_cte_depth must be greater than 0")
-			}
-			if cfg.RecursiveCTEMaxRecursion <= 0 {
-				return fmt.Errorf("sqlserver: recursive_cte_max_recursion must be greater than 0")
+	if desc, ok := LookupAdapterDescriptor(c.Adapter); ok {
+		if desc.ValidateConfig != nil {
+			if err := desc.ValidateConfig(c); err != nil {
+				return err
 			}
 		}
-		if hasDSN {
-			break
-		}
-		if host == "" {
-			return fmt.Errorf("%s: host must be specified", c.Adapter)
-		}
-		if username == "" {
-			return fmt.Errorf("%s: username must be specified", c.Adapter)
-		}
-		if database == "" {
-			return fmt.Errorf("%s: database name must be specified", c.Adapter)
-		}
-
-	case "mongodb":
-		mongoCfg := c.ResolvedMongoConfig()
-		c.MongoDB = mongoCfg
-		if mongoCfg.Database == "" {
-			return fmt.Errorf("mongodb: database name must be specified")
-		}
-		if strings.TrimSpace(mongoCfg.URI) == "" {
-			return fmt.Errorf("mongodb: uri must be specified")
-		}
-		if mongoCfg.RelationJoinStrategy != "lookup" && mongoCfg.RelationJoinStrategy != "pipeline" {
-			return fmt.Errorf("mongodb: relation_join_strategy must be lookup or pipeline")
-		}
-
-	case "neo4j":
-		neo4jCfg := c.ResolvedNeo4jConfig()
-		c.Neo4j = neo4jCfg
-		if strings.TrimSpace(neo4jCfg.URI) == "" {
-			return fmt.Errorf("neo4j: uri must be specified")
-		}
-		if strings.TrimSpace(neo4jCfg.Username) == "" {
-			return fmt.Errorf("neo4j: username must be specified")
-		}
-
-	default:
+	} else {
 		return fmt.Errorf("unsupported adapter: %s", c.Adapter)
 	}
 
@@ -1060,34 +1055,9 @@ func (c *Config) Validate() error {
 
 // DefaultConfig 返回默认配置
 func DefaultConfig(adapterType string) *Config {
-	config := &Config{
-		Adapter: adapterType,
-		Pool: &PoolConfig{
-			MaxConnections: 25,
-			MinConnections: 0,
-			ConnectTimeout: 30,
-			IdleTimeout:    300,
-		},
-	}
-
-	switch adapterType {
-	case "sqlite":
-		config.SQLite = &SQLiteConnectionConfig{Path: "./eit.db"}
-
-	case "postgres":
-		config.Postgres = &PostgresConnectionConfig{Host: "localhost", Port: 5432, Database: "eit", Username: "postgres", Password: "postgres", SSLMode: "disable"}
-
-	case "mysql":
-		config.MySQL = &MySQLConnectionConfig{Host: "localhost", Port: 3306, Database: "eit", Username: "root", Password: "root"}
-
-	case "sqlserver":
-		config.SQLServer = &SQLServerConnectionConfig{Host: "localhost", Port: 1433, Database: "master", Username: "sa", Password: "YourStrong!Passw0rd"}
-
-	case "mongodb":
-		config.MongoDB = &MongoConnectionConfig{URI: "mongodb://localhost:27017", Database: "eit"}
-
-	case "neo4j":
-		config.Neo4j = &Neo4jConnectionConfig{URI: "neo4j://localhost:7687", Username: "neo4j", Password: "neo4j", Database: "neo4j"}
+	config := newDefaultAdapterConfig(adapterType)
+	if desc, ok := LookupAdapterDescriptor(adapterType); ok && desc.DefaultConfig != nil {
+		return desc.DefaultConfig()
 	}
 
 	return config

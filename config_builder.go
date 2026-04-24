@@ -11,7 +11,7 @@ type ConfigOption func(*Config)
 
 // NewConfig 通过函数式选项创建并验证 Config。
 //
-// adapter 可选值: "postgres" | "mysql" | "sqlserver" | "sqlite" | "mongodb" | "neo4j"
+// adapter 可选值: "postgres" | "mysql" | "sqlserver" | "sqlite" | "mongodb" | "neo4j" | "redis"
 //
 // 每个选项直接写入对应适配器的专属子配置（如 cfg.Postgres.Host），无需关心
 // 平铺字段或 Options map。Validate() 在内部调用，返回 error 时配置无效。
@@ -75,6 +75,11 @@ func WithHost(host string) ConfigOption {
 				cfg.SQLServer = &SQLServerConnectionConfig{}
 			}
 			cfg.SQLServer.Host = host
+		case "redis":
+			if cfg.Redis == nil {
+				cfg.Redis = &RedisConnectionConfig{}
+			}
+			cfg.Redis.Host = host
 		default:
 			cfg.Host = host
 		}
@@ -100,6 +105,11 @@ func WithPort(port int) ConfigOption {
 				cfg.SQLServer = &SQLServerConnectionConfig{}
 			}
 			cfg.SQLServer.Port = port
+		case "redis":
+			if cfg.Redis == nil {
+				cfg.Redis = &RedisConnectionConfig{}
+			}
+			cfg.Redis.Port = port
 		default:
 			cfg.Port = port
 		}
@@ -166,6 +176,11 @@ func WithUsername(username string) ConfigOption {
 				cfg.Neo4j = &Neo4jConnectionConfig{}
 			}
 			cfg.Neo4j.Username = username
+		case "redis":
+			if cfg.Redis == nil {
+				cfg.Redis = &RedisConnectionConfig{}
+			}
+			cfg.Redis.Username = username
 		default:
 			cfg.Username = username
 		}
@@ -196,6 +211,11 @@ func WithPassword(password string) ConfigOption {
 				cfg.Neo4j = &Neo4jConnectionConfig{}
 			}
 			cfg.Neo4j.Password = password
+		case "redis":
+			if cfg.Redis == nil {
+				cfg.Redis = &RedisConnectionConfig{}
+			}
+			cfg.Redis.Password = password
 		default:
 			cfg.Password = password
 		}
@@ -232,11 +252,12 @@ func WithDSN(dsn string) ConfigOption {
 	}
 }
 
-// WithURI 通过 URI 字符串配置 MongoDB 或 Neo4j 适配器。
+// WithURI 通过 URI 字符串配置 MongoDB、Neo4j 或 Redis 适配器。
 // 使用 URI 时，WithHost / WithPort / WithUsername / WithPassword 均可省略。
 //
 // MongoDB 示例: "mongodb://localhost:27017" 或 "mongodb+srv://..."
 // Neo4j 示例: "neo4j://localhost:7687" 或 "neo4j+ssc://..."
+// Redis 示例: "redis://[:password@]localhost:6379/0"
 func WithURI(uri string) ConfigOption {
 	return func(cfg *Config) {
 		switch cfg.Adapter {
@@ -250,6 +271,11 @@ func WithURI(uri string) ConfigOption {
 				cfg.Neo4j = &Neo4jConnectionConfig{}
 			}
 			cfg.Neo4j.URI = uri
+		case "redis":
+			if cfg.Redis == nil {
+				cfg.Redis = &RedisConnectionConfig{}
+			}
+			cfg.Redis.URI = uri
 		}
 	}
 }
@@ -358,4 +384,72 @@ func WithValidation(validation *ValidationConfig) ConfigOption {
 	return func(cfg *Config) {
 		cfg.Validation = validation
 	}
+}
+
+// ── Redis 专属配置 ──────────────────────────────────────────────────────────
+
+// WithRedisDB 设置 Redis 数据库编号（0-15，仅单机模式有效）。
+func WithRedisDB(db int) ConfigOption {
+	return func(cfg *Config) {
+		if cfg.Redis == nil {
+			cfg.Redis = &RedisConnectionConfig{}
+		}
+		cfg.Redis.DB = db
+	}
+}
+
+// WithRedisTLS 启用或禁用 TLS 连接。
+func WithRedisTLS(enabled bool) ConfigOption {
+	return func(cfg *Config) {
+		if cfg.Redis == nil {
+			cfg.Redis = &RedisConnectionConfig{}
+		}
+		cfg.Redis.TLSEnabled = enabled
+	}
+}
+
+// WithRedisCluster 启用集群模式并设置集群节点地址列表。
+// 启用后 Host/Port/DB 字段无效，连接通过 ClusterAddrs 路由。
+func WithRedisCluster(addrs ...string) ConfigOption {
+	return func(cfg *Config) {
+		if cfg.Redis == nil {
+			cfg.Redis = &RedisConnectionConfig{}
+		}
+		cfg.Redis.ClusterMode = true
+		cfg.Redis.ClusterAddrs = addrs
+	}
+}
+
+// WithRedisTimeouts 设置 Redis 拨号、读取、写入超时（单位：秒）。
+// 传 0 表示使用驱动默认值。
+func WithRedisTimeouts(dialSec, readSec, writeSec int) ConfigOption {
+	return func(cfg *Config) {
+		if cfg.Redis == nil {
+			cfg.Redis = &RedisConnectionConfig{}
+		}
+		cfg.Redis.DialTimeout = dialSec
+		cfg.Redis.ReadTimeout = readSec
+		cfg.Redis.WriteTimeout = writeSec
+	}
+}
+
+// ── 自定义适配器通用逃生舱 ──────────────────────────────────────────────────
+
+// WithConfigFunc 直接操作 *Config 的通用逃生舱选项。
+//
+// 用于内置 With* 选项尚未覆盖的场景，例如自定义适配器通过 Options 传参：
+//
+//	cfg, err := db.NewConfig("mydb",
+//	    db.WithConfigFunc(func(cfg *db.Config) {
+//	        if cfg.Options == nil {
+//	            cfg.Options = make(map[string]interface{})
+//	        }
+//	        cfg.Options["endpoint"] = "https://mydb.internal:9000"
+//	        cfg.Options["timeout_ms"] = 5000
+//	    }),
+//	)
+//
+// WithConfigFunc 可以与其他 With* 选项任意混用，执行顺序与参数顺序一致。
+func WithConfigFunc(fn func(*Config)) ConfigOption {
+	return fn
 }

@@ -15,6 +15,8 @@ const (
 	StartupCapabilityJSONRuntime = "json_runtime"
 	// StartupCapabilityFullTextRuntime 全文运行时能力。
 	StartupCapabilityFullTextRuntime = "full_text_runtime"
+	// StartupCapabilityRedisRuntime Redis 运行时能力矩阵。
+	StartupCapabilityRedisRuntime = "redis_runtime"
 )
 
 const (
@@ -25,6 +27,7 @@ const (
 var supportedStartupCapabilities = []string{
 	StartupCapabilityJSONRuntime,
 	StartupCapabilityFullTextRuntime,
+	StartupCapabilityRedisRuntime,
 }
 
 // StartupCapabilityConfig 启动期能力体检配置。
@@ -110,8 +113,12 @@ func (r *Repository) RunStartupCapabilityCheck(ctx context.Context, cfg *Startup
 
 	inspectList := uniqueCapabilityNames(cfg.Inspect)
 	requiredList := uniqueCapabilityNames(cfg.Required)
+	metadata := r.resolveAdapterMetadata(r.adapter)
 	if len(inspectList) == 0 {
 		inspectList = append(inspectList, StartupCapabilityJSONRuntime, StartupCapabilityFullTextRuntime)
+		if metadata.Name == "redis" {
+			inspectList = append(inspectList, StartupCapabilityRedisRuntime)
+		}
 	}
 	for _, req := range requiredList {
 		if !slices.Contains(inspectList, req) {
@@ -127,7 +134,7 @@ func (r *Repository) RunStartupCapabilityCheck(ctx context.Context, cfg *Startup
 	}
 
 	report := &StartupCapabilityReport{
-		Adapter:     inferAdapterName(r.adapter),
+		Adapter:     metadata.Name,
 		Mode:        mode,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 		Checks:      make([]StartupCapabilityCheck, 0, len(inspectList)),
@@ -225,6 +232,43 @@ func (r *Repository) RunStartupCapabilityCheck(ctx context.Context, cfg *Startup
 					strictFailures = append(strictFailures, capability+": not supported")
 				}
 			}
+
+		case StartupCapabilityRedisRuntime:
+			inspector, ok := r.adapter.(RedisRuntimeInspector)
+			check.InspectorAvailable = ok
+			if !ok {
+				check.Status = "unavailable"
+				check.Supported = false
+				check.Notes = "adapter does not implement RedisRuntimeInspector"
+				if enforced {
+					strictFailures = append(strictFailures, capability+": inspector unavailable")
+				}
+				break
+			}
+
+			runtime, err := inspector.InspectRedisRuntime(ctx)
+			if err != nil {
+				check.Status = "error"
+				check.Supported = false
+				check.Error = err.Error()
+				if enforced {
+					strictFailures = append(strictFailures, capability+": inspect error")
+				}
+				break
+			}
+
+			check.Supported = runtime != nil && runtime.AllRequiredSupported
+			if runtime != nil {
+				check.Notes = runtime.Summary
+			}
+			if check.Supported {
+				check.Status = "ok"
+			} else {
+				check.Status = "degraded"
+				if enforced {
+					strictFailures = append(strictFailures, capability+": required features degraded")
+				}
+			}
 		}
 
 		report.Checks = append(report.Checks, check)
@@ -271,23 +315,4 @@ func uniqueCapabilityNames(input []string) []string {
 		out = append(out, name)
 	}
 	return out
-}
-
-func inferAdapterName(adapter Adapter) string {
-	switch adapter.(type) {
-	case *PostgreSQLAdapter:
-		return "postgres"
-	case *MySQLAdapter:
-		return "mysql"
-	case *SQLiteAdapter:
-		return "sqlite"
-	case *SQLServerAdapter:
-		return "sqlserver"
-	case *MongoAdapter:
-		return "mongodb"
-	case *Neo4jAdapter:
-		return "neo4j"
-	default:
-		return "unknown"
-	}
 }
