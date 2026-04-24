@@ -21,9 +21,96 @@
 go get github.com/eit-cms/eit-db
 ```
 
-### v1.1.1 - NoSQL 特色能力增强与任务调度优化 (2026-03-23)
+## Adapter 注册机制
 
-**核心变化**：优化跨适配器任务调度与回退策略，补齐 MongoDB/Neo4j 的可复用特色能力，减少应用层重复实现
+自定义适配器现在优先使用描述符注册机制。一个适配器的创建、专属配置校验和默认配置应通过一次 `RegisterAdapterDescriptor` 或 `MustRegisterAdapterDescriptor` 完成，而不是分散修改框架内部 switch/case。
+
+```go
+func init() {
+    db.MustRegisterAdapterDescriptor("mydb", db.AdapterDescriptor{
+        Factory: func(cfg *db.Config) (db.Adapter, error) {
+            adapter, err := NewMyAdapter(cfg)
+            if err != nil {
+                return nil, err
+            }
+            if err := adapter.Connect(context.Background(), cfg); err != nil {
+                return nil, err
+            }
+            return adapter, nil
+        },
+        ValidateConfig: func(cfg *db.Config) error {
+            return nil
+        },
+        DefaultConfig: func() *db.Config {
+            return &db.Config{Adapter: "mydb"}
+        },
+    })
+}
+```
+
+旧版 `RegisterAdapter` 和 `RegisterAdapterConstructor` 仍然保留为兼容层，并会自动桥接到描述符注册表，避免已有代码立即失效。
+
+注意：旧版兼容层计划在下一个 minor 版本移除。新代码应优先使用描述符注册机制。
+
+## Adapter Metadata 最佳实践
+
+从 v1.1 起，框架支持统一的 Adapter 元信息解析，推荐第三方适配器在描述符中显式提供 `Metadata`，避免运行时依赖类型推断。
+
+```go
+func init() {
+    db.MustRegisterAdapterDescriptor("mydb", db.AdapterDescriptor{
+        Factory: func(cfg *db.Config) (db.Adapter, error) {
+            adapter, err := NewMyAdapter(cfg)
+            if err != nil {
+                return nil, err
+            }
+            if err := adapter.Connect(context.Background(), cfg); err != nil {
+                return nil, err
+            }
+            return adapter, nil
+        },
+        ValidateConfig: func(cfg *db.Config) error {
+            return nil
+        },
+        DefaultConfig: func() *db.Config {
+            return &db.Config{Adapter: "mydb"}
+        },
+        Metadata: func() db.AdapterMetadata {
+            return db.AdapterMetadata{
+                Name:       "mydb",
+                DriverKind: "document", // sql | document | graph | kv
+                Vendor:     "acme",
+                Version:    "1.x",
+                Aliases:    []string{"acme-db"},
+            }
+        },
+    })
+}
+```
+
+如果你只拿到 Adapter 实例，也可以通过公开 API 获取统一元信息：
+
+```go
+meta := db.ResolveAdapterMetadata("", adapter)
+fmt.Println(meta.Name)
+```
+
+如果你在 Repository 上下文中，直接使用：
+
+```go
+meta := repo.GetAdapterMetadata()
+fmt.Println(meta.Name)
+```
+
+## 配置入口约定
+
+EIT-DB 现在明确采用统一配置入口：新代码应通过 `Config`、`NewConfig`、`LoadConfig` 或适配器注册表提供配置，而不是再引入额外的环境变量配置入口。
+
+`LoadConfigFromEnv`、`LoadConfigFromEnvWithDefaults` 和 `InitDBFromEnv` 仅作为旧版兼容层保留，不再扩展新适配器特性，计划在下一个 minor 版本移除。
+
+### v1.1.2 - 定时任务增强与回退可观测性升级 (2026-04-22)
+
+**核心变化**：补齐 SQL 适配器原生调度路径与统一 fallback reason 可观测性，提升跨适配器任务调度稳定性
 ## 🧪 选型决策树（30 秒）
 
 按下面问题快速判断是否适合使用 EIT-DB：
@@ -286,6 +373,164 @@ if err != nil {
 - **Repository 统一入口**：所有读写通过 Repository，避免直接暴露底层 ORM。
 - **Schema ⇄ Go 类型**：既支持手动 Schema，也支持从 Go 结构体反射生成。
 - **动态表建表一致性**：动态表配置统一转换为 Schema，再经方言建表器生成 DDL，避免 Adapter 内手写 CREATE TABLE 分叉。
+
+## 定时任务（能力补充）
+
+### 调度语义（Native / Fallback）
+
+Repository 在定时任务注册、注销、列表查询时，遵循以下路由语义：
+
+1. 优先走 Adapter 原生调度能力（native）。
+2. 若 Adapter 返回“需应用层回退”的错误，并且 `EnableScheduledTaskFallback` 开启（默认开启），自动切换到应用层 in-process cron 调度器。
+3. 若 fallback 关闭，则直接返回 Adapter 错误。
+
+### 共享 fallback API
+
+- 哨兵错误：`ErrScheduledTaskFallbackRequired`
+- 构造函数：`NewScheduledTaskFallbackErrorWithReason(adapter, reason, detail)`
+- 兼容构造：`NewScheduledTaskFallbackError(adapter, detail)`
+- 判断函数：`IsScheduledTaskFallbackError(err)`
+- 原因提取：`ScheduledTaskFallbackReasonOf(err)`
+
+### reason 枚举
+
+- `adapter_unsupported`：该适配器不支持原生调度（如 SQLite/MongoDB/Neo4j/gorm wrapper）。
+- `native_capability_missing`：适配器支持该路径，但当前运行环境缺失原生能力（如 SQL Server Agent 不可用、MySQL EVENT scheduler 关闭）。
+- `cron_expression_unsupported`：原生调度器无法表达当前 cron 语义（如 SQL Server Agent 仅支持 `m h d * *` 月度形态）。
+- `unknown`：兼容旧版错误文案或未标注 reason 的回退错误。
+
+### 当前行为示例
+
+- PostgreSQL：优先原生（函数 + 可选 pg_cron），不满足条件时可由 Repository 统一回退。
+- SQL Server：Agent 不可用或 cron 形态不支持时，返回带 reason 的 fallback 错误，Repository 自动接管。
+- MySQL：EVENT scheduler 不可用时，返回 `native_capability_missing`，Repository 自动接管。
+- SQLite/MongoDB/Neo4j：直接返回 `adapter_unsupported`，由 Repository fallback 承接。
+
+### 功能完成度报告
+
+以下完成度基于当前代码路径与测试状态，面向“月度建表任务（`monthly_table_creation`）”能力。
+
+| Adapter | 原生注册/注销/列表 | 原生调度能力探测 | 应用层 fallback 对接 | reason 可观测性 | 完成度 |
+|---|---|---|---|---|---|
+| PostgreSQL | 完整支持 | 支持（pg_cron 可选） | 支持（由 Repository 接管） | 支持 | 高（95%） |
+| SQL Server | 完整支持 | 支持（Agent 可用性 + cron 形态） | 支持 | 支持 | 高（92%） |
+| MySQL | 完整支持 | 支持（EVENT scheduler） | 支持 | 支持 | 高（90%） |
+| SQLite | 原生不支持 | 不适用 | 支持（默认路径） | 支持 | 高（fallback 100%） |
+| MongoDB | 原生不支持 | 不适用 | 支持（默认路径） | 支持 | 高（fallback 100%） |
+| Neo4j | 原生不支持 | 不适用 | 支持（默认路径） | 支持 | 高（fallback 100%） |
+
+说明：
+- “完成度”以已实现能力覆盖和工程可用性衡量，不等同于所有数据库都具备同样原生调度器。
+- 对无原生调度器的后端，目标是“可稳定 fallback + 可观测 + 可配置”。
+
+### 使用指南
+
+#### 1. 创建 Repository（默认开启 fallback）
+
+```go
+cfg := &db.Config{
+    Adapter:  "postgres",
+    Host:     "127.0.0.1",
+    Port:     5432,
+    Username: "postgres",
+    Password: "postgres",
+    Database: "app",
+    SSLMode:  "disable",
+}
+
+repo, err := db.NewRepository(cfg)
+if err != nil {
+    panic(err)
+}
+defer repo.Close()
+```
+
+#### 2. 注册任务
+
+```go
+task := &db.ScheduledTaskConfig{
+    Name:           "monthly_page_logs",
+    Type:           db.TaskTypeMonthlyTableCreation,
+    CronExpression: "0 0 1 * *",
+    Description:    "create next month page log table",
+    Enabled:        true,
+    Config: map[string]interface{}{
+        "tableName": "page_logs",
+        "monthFormat": "2006_01",
+        "fieldDefinitions": "id BIGSERIAL PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+    },
+}
+
+if err := repo.RegisterScheduledTask(ctx, task); err != nil {
+    panic(err)
+}
+```
+
+#### 3. 列表与状态观测
+
+```go
+tasks, err := repo.ListScheduledTasks(ctx)
+if err != nil {
+    panic(err)
+}
+
+for _, t := range tasks {
+    fmt.Printf("name=%s type=%s running=%v next=%d info=%v\n", t.Name, t.Type, t.Running, t.NextExecutedAt, t.Info)
+}
+```
+
+常见 `Info` 观测字段：
+- 通用：`cron`, `schedule_mode`, `last_status`, `last_error`
+- PostgreSQL：`pg_cron_job_id`, `pg_cron_schedule`, `pg_cron_last_status`
+- SQL Server：`agent_job_name`, `agent_last_status`
+- MySQL：`event_name`, `event_status`
+- fallback：`mode=in_process_fallback`
+
+#### 4. 注销任务
+
+```go
+if err := repo.UnregisterScheduledTask(ctx, "monthly_page_logs"); err != nil {
+    panic(err)
+}
+```
+
+#### 5. 控制 fallback 开关
+
+默认开启。若希望“只允许原生调度，不允许应用层接管”，可显式关闭：
+
+```go
+disabled := false
+cfg := &db.Config{
+    Adapter:                      "sqlite",
+    Database:                     ":memory:",
+    EnableScheduledTaskFallback: &disabled,
+}
+```
+
+#### 6. 在业务层识别 fallback 原因（可选）
+
+```go
+err := repo.RegisterScheduledTask(ctx, task)
+if err != nil {
+    if db.IsScheduledTaskFallbackError(err) {
+        reason, _ := db.ScheduledTaskFallbackReasonOf(err)
+        fmt.Printf("scheduled task fallback triggered, reason=%s, err=%v\n", reason, err)
+    }
+    return err
+}
+```
+
+reason 取值：
+- `adapter_unsupported`
+- `native_capability_missing`
+- `cron_expression_unsupported`
+- `unknown`
+
+#### 7. 推荐接入策略
+
+1. 生产环境建议保留 fallback 开启，避免因环境差异导致任务注册失败。
+2. 通过 `ScheduledTaskFallbackReasonOf` 记录指标，区分“能力缺失”与“表达式不兼容”。
+3. 需要强约束环境一致性时，在预发/生产关闭 fallback，配合启动期能力检查做门禁。
 
 ## 🕸️ Neo4j 关系特性（新增）
 
@@ -1239,6 +1484,7 @@ func NewMigration_20260203160000_AddIndexes() db.MigrationInterface {
 ## 📖 文档
 
 - [架构总览](docs/ARCHITECTURE.md) - 当前架构与路线图目标对齐说明
+- [v1.1.2 Release Notes](docs/RELEASE_NOTES_v1_1_2.md) - 定时任务增强与 fallback 可观测性说明
 - [v1.1.1 Release Notes](docs/RELEASE_NOTES_v1_1.md) - 小版本优化与 NoSQL 特色能力发布说明
 - [v1.1 路线图](docs/V1_1_ROADMAP.md) - 迁移入口统一与 MongoDB/Neo4j 迁移接入目标
 - [v1.1 升级指南（Schema/Query Builder）](docs/MIGRATION_GUIDE_v1_1.md) - Schema 关系注册与 Query Builder API 迁移说明
@@ -1337,6 +1583,17 @@ go test -bench=. -benchmem
 ```
 
 ## 📊 版本更新
+
+### v1.1.2 - 定时任务增强与回退可观测性升级 (2026-04-22)
+
+**核心里程碑**：将定时任务能力从“可回退可用”推进到“原生优先 + 回退标准化 + 可观测”
+
+- ✅ PostgreSQL / SQL Server / MySQL 定时任务原生路径完善（注册/注销/列表与元数据状态）
+- ✅ 应用层 fallback 语义标准化：`ErrScheduledTaskFallbackRequired` + 结构化 reason
+- ✅ reason 体系落地：`adapter_unsupported` / `native_capability_missing` / `cron_expression_unsupported` / `unknown`
+- ✅ Repository 在 register/unregister/list 路径统一接管 fallback，行为一致性提升
+- ✅ README 补齐“能力补充”章节，含完成度矩阵与接入/观测指南
+- ✅ 回归测试通过：`go test ./... -run 'ScheduledTask|DynamicTable'`
 
 ### v1.1.1 - NoSQL 特色能力增强与任务调度优化 (2026-03-23)
 
@@ -1467,13 +1724,13 @@ go test ./... -v
 
 ### 集成测试
 
-测试所有适配器（SQLite 无需依赖，PostgreSQL/MySQL 需要 Docker）：
+测试所有适配器（SQLite 无需依赖；其余后端必须先启动项目官方 Docker 环境）：
 
 ```bash
-# 仅 SQLite 测试（推荐开发期间使用）
+# 仅 SQLite 测试（推荐快速开发场景）
 go test ./adapter-application-tests -v
 
-# 或使用测试脚本
+# 全量集成测试（要求官方 compose 环境已启动；后端不可用会直接失败）
 ./test.sh integration
 
 # 完整测试（启动所有数据库 + 运行测试）
@@ -1483,7 +1740,7 @@ go test ./adapter-application-tests -v
 ### 使用 Docker 运行完整测试
 
 ```bash
-# 启动 PostgreSQL、MySQL、SQL Server 容器
+# 启动项目官方测试镜像（PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j）
 ./test.sh start
 
 # 运行所有测试
@@ -1507,7 +1764,10 @@ go test ./adapter-application-tests -v
 - ✅ QueryFeatures：版本感知、优先级路由、特性声明
 - ⏭️ PostgreSQL：物化视图、数组、全文搜索、JSONB
 - ⏭️ MySQL：全文搜索、JSON、窗口函数、ON DUPLICATE KEY
-- ⏭️ SQL Server：MERGE、递归 CTE、临时表
+- ✅ SQL Server：基础迁移与动态表/特性 E2E 覆盖
+- ✅ Redis：基础读写与订阅能力集成覆盖
+- ✅ MongoDB：基础文档读写集成覆盖
+- ✅ Neo4j：基础图写入/查询/删除集成覆盖
 
 ## 📝 许可证
 
@@ -1519,5 +1779,5 @@ MIT License
 
 ---
 
-**最后更新**：2026-03-23  
-**当前版本**：v1.1.1（Patch 发布）
+**最后更新**：2026-04-22  
+**当前版本**：v1.1.2（Patch 发布）

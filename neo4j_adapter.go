@@ -14,11 +14,12 @@ import (
 
 // Neo4jAdapter Neo4j 适配器（最小可用版本：连接/健康检查/能力声明）。
 type Neo4jAdapter struct {
-	driver   neo4j.DriverWithContext
-	uri      string
-	username string
-	password string
-	database string
+	driver       neo4j.DriverWithContext
+	uri          string
+	username     string
+	password     string
+	database     string
+	socialConfig *Neo4jSocialNetworkConfig
 }
 
 // CypherWriteSummary 表示 Neo4j 写入执行摘要。
@@ -42,10 +43,11 @@ func NewNeo4jAdapter(config *Config) (*Neo4jAdapter, error) {
 	}
 	resolved := config.ResolvedNeo4jConfig()
 	return &Neo4jAdapter{
-		uri:      resolved.URI,
-		username: resolved.Username,
-		password: resolved.Password,
-		database: resolved.Database,
+		uri:          resolved.URI,
+		username:     resolved.Username,
+		password:     resolved.Password,
+		database:     resolved.Database,
+		socialConfig: resolved.SocialNetwork,
 	}, nil
 }
 
@@ -69,6 +71,7 @@ func (a *Neo4jAdapter) Connect(ctx context.Context, config *Config) error {
 		username = resolved.Username
 		password = resolved.Password
 		database = resolved.Database
+		a.socialConfig = resolved.SocialNetwork
 	}
 
 	driver, err := neo4j.NewDriverWithContext(uri, neo4j.BasicAuth(username, password, ""))
@@ -138,17 +141,17 @@ func (a *Neo4jAdapter) GetRawConn() interface{} {
 
 // RegisterScheduledTask Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
-	return fmt.Errorf("neo4j: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // UnregisterScheduledTask Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
-	return fmt.Errorf("neo4j: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // ListScheduledTasks Neo4j 暂不支持定时任务接口。
 func (a *Neo4jAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	return nil, fmt.Errorf("neo4j: scheduled task not supported")
+	return nil, NewScheduledTaskFallbackErrorWithReason("neo4j", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // QueryCypher 执行读类型 Cypher，并返回记录列表。
@@ -429,27 +432,27 @@ func (a *Neo4jAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			"notes": "directional request to bidirectional friendship transition",
 		}, nil
 	case "social_model_bidirectional_follow":
-		return buildNeo4jSocialPresetModel("bidirectional_follow")
+		return a.buildSocialPresetModel("bidirectional_follow")
 	case "social_model_friendship":
-		return buildNeo4jSocialPresetModel("friendship")
+		return a.buildSocialPresetModel("friendship")
 	case "social_model_forum_post":
-		return buildNeo4jSocialPresetModel("forum_post")
+		return a.buildSocialPresetModel("forum_post")
 	case "social_model_one_to_one_chat":
-		return buildNeo4jSocialPresetModel("one_to_one_chat")
+		return a.buildSocialPresetModel("one_to_one_chat")
 	case "social_model_group_chat_room":
-		return buildNeo4jSocialPresetModel("group_chat_room")
+		return a.buildSocialPresetModel("group_chat_room")
 	case "social_model_chat_receipt":
-		return buildNeo4jSocialPresetModel("chat_receipt")
+		return a.buildSocialPresetModel("chat_receipt")
 	case "social_model_chat_moderation":
-		return buildNeo4jSocialPresetModel("chat_moderation")
+		return a.buildSocialPresetModel("chat_moderation")
 	case "social_model_message_emoji":
-		return buildNeo4jSocialPresetModel("message_emoji")
+		return a.buildSocialPresetModel("message_emoji")
 	case "social_network_preset_model":
 		preset, _ := input["preset"].(string)
 		if strings.TrimSpace(preset) == "" {
 			preset = "bidirectional_follow"
 		}
-		return buildNeo4jSocialPresetModel(preset)
+		return a.buildSocialPresetModel(preset)
 	case "social_model_executor":
 		preset, _ := input["preset"].(string)
 		if strings.TrimSpace(preset) == "" {
@@ -459,13 +462,51 @@ func (a *Neo4jAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 		if execute && a.driver == nil {
 			return nil, fmt.Errorf("neo4j driver not connected")
 		}
-		return buildNeo4jSocialModelExecutor(ctx, a.driver, a.database, preset, execute)
+		return a.buildSocialModelExecutor(ctx, preset, execute)
 	default:
 		return nil, fmt.Errorf("neo4j custom feature not supported: %s", feature)
 	}
 }
 
-func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) {
+// resolvedSocialConfig 返回非空的社交网络配置（确保含默认值）。
+func (a *Neo4jAdapter) resolvedSocialConfig() *Neo4jSocialNetworkConfig {
+	if a.socialConfig != nil {
+		return a.socialConfig
+	}
+	return resolvedNeo4jSocialNetworkConfig(nil)
+}
+
+func (a *Neo4jAdapter) buildSocialPresetModel(preset string) (map[string]interface{}, error) {
+	cfg := a.resolvedSocialConfig()
+	uL := cfg.UserLabel
+	roomL := cfg.ChatRoomLabel
+	msgL := cfg.ChatMessageLabel
+	postL := cfg.PostLabel
+	commentL := cfg.CommentLabel
+	forumL := cfg.ForumLabel
+	emojiL := cfg.EmojiLabel
+
+	followsR := cfg.FollowsRelType
+	friendR := cfg.FriendRelType
+	friendReqR := cfg.FriendRequestRelType
+	sentR := cfg.SentRelType
+	memberOfR := cfg.MemberOfRelType
+	inRoomR := cfg.InRoomRelType
+	inRoomMsgR := cfg.InRoomMsgRelType
+	mutedR := cfg.MutedInRelType
+	bannedR := cfg.BannedInRelType
+	readByR := cfg.ReadByRelType
+	authoredR := cfg.AuthoredRelType
+	createdR := cfg.CreatedRelType
+	ftIndex := cfg.ChatMessageFulltextIndex
+
+	uLC := strings.ToLower(uL)
+	roomLC := strings.ToLower(roomL)
+	msgLC := strings.ToLower(msgL)
+	postLC := strings.ToLower(postL)
+	forumLC := strings.ToLower(forumL)
+	emojiLC := strings.ToLower(emojiL)
+
 	switch strings.ToLower(strings.TrimSpace(preset)) {
 	case "bidirectional_follow", "mutual_follow":
 		return map[string]interface{}{
@@ -473,16 +514,19 @@ func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) 
 			"strategy": "social_network_preset_model",
 			"preset":   "bidirectional_follow",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
 			},
 			"queries": map[string]string{
-				"create_user":      "MERGE (u:User {id: $user_id}) SET u.name = coalesce($name, u.name), u.created_at = coalesce(u.created_at, datetime()) RETURN u",
-				"follow":           "MATCH (a:User {id: $from_id}), (b:User {id: $to_id}) MERGE (a)-[f:FOLLOWS]->(b) SET f.created_at = coalesce(f.created_at, datetime()) RETURN a, f, b",
-				"unfollow":         "MATCH (a:User {id: $from_id})-[f:FOLLOWS]->(b:User {id: $to_id}) DELETE f",
-				"mutual_followers": "MATCH (a:User {id: $user_id})-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(a) RETURN b",
-				"suggestions":      "MATCH (a:User {id: $user_id})-[:FOLLOWS]->(:User)-[:FOLLOWS]->(candidate:User) WHERE candidate.id <> $user_id AND NOT (a)-[:FOLLOWS]->(candidate) RETURN candidate, count(*) AS score ORDER BY score DESC LIMIT $limit",
+				"create_user":      fmt.Sprintf("MERGE (u:%s {id: $user_id}) SET u.name = coalesce($name, u.name), u.created_at = coalesce(u.created_at, datetime()) RETURN u", uL),
+				"follow":           fmt.Sprintf("MATCH (a:%s {id: $from_id}), (b:%s {id: $to_id}) MERGE (a)-[f:%s]->(b) SET f.created_at = coalesce(f.created_at, datetime()) RETURN a, f, b", uL, uL, followsR),
+				"unfollow":         fmt.Sprintf("MATCH (a:%s {id: $from_id})-[f:%s]->(b:%s {id: $to_id}) DELETE f", uL, followsR, uL),
+				"mutual_followers": fmt.Sprintf("MATCH (a:%s {id: $user_id})-[:%s]->(b:%s)-[:%s]->(a) RETURN b", uL, followsR, uL, followsR),
+				"suggestions":      fmt.Sprintf("MATCH (a:%s {id: $user_id})-[:%s]->(:%s)-[:%s]->(candidate:%s) WHERE candidate.id <> $user_id AND NOT (a)-[:%s]->(candidate) RETURN candidate, count(*) AS score ORDER BY score DESC LIMIT $limit", uL, followsR, uL, followsR, uL, followsR),
 			},
-			"notes": "Directed follow graph with built-in mutual-follow query for social discovery",
+			"notes":             "Directed follow graph with built-in mutual-follow query for social discovery",
+			"config_labels":     map[string]string{"user": uL},
+			"config_rel_types":  map[string]string{"follows": followsR},
+			"permission_levels": cfg.PermissionLevels,
 		}, nil
 	case "friendship", "friend":
 		return map[string]interface{}{
@@ -490,16 +534,19 @@ func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) 
 			"strategy": "social_network_preset_model",
 			"preset":   "friendship",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
 			},
 			"queries": map[string]string{
-				"send_request":   "MATCH (a:User {id: $from_id}), (b:User {id: $to_id}) MERGE (a)-[r:FRIEND_REQUEST]->(b) SET r.created_at = coalesce(r.created_at, datetime()), r.message = $message RETURN a, r, b",
-				"accept_request": "MATCH (a:User {id: $from_id})-[r:FRIEND_REQUEST]->(b:User {id: $to_id}) DELETE r MERGE (a)-[f1:FRIEND]->(b) MERGE (b)-[f2:FRIEND]->(a) SET f1.since = datetime(), f2.since = datetime() RETURN a, f1, b, f2",
-				"reject_request": "MATCH (:User {id: $from_id})-[r:FRIEND_REQUEST]->(:User {id: $to_id}) DELETE r",
-				"list_friends":   "MATCH (u:User {id: $user_id})-[:FRIEND]->(f:User) RETURN f",
-				"mutual_friends": "MATCH (u1:User {id: $user_a})-[:FRIEND]->(m:User)<-[:FRIEND]-(u2:User {id: $user_b}) RETURN m",
+				"send_request":   fmt.Sprintf("MATCH (a:%s {id: $from_id}), (b:%s {id: $to_id}) MERGE (a)-[r:%s]->(b) SET r.created_at = coalesce(r.created_at, datetime()), r.message = $message RETURN a, r, b", uL, uL, friendReqR),
+				"accept_request": fmt.Sprintf("MATCH (a:%s {id: $from_id})-[r:%s]->(b:%s {id: $to_id}) DELETE r MERGE (a)-[f1:%s]->(b) MERGE (b)-[f2:%s]->(a) SET f1.since = datetime(), f2.since = datetime() RETURN a, f1, b, f2", uL, friendReqR, uL, friendR, friendR),
+				"reject_request": fmt.Sprintf("MATCH (:%s {id: $from_id})-[r:%s]->(:%s {id: $to_id}) DELETE r", uL, friendReqR, uL),
+				"list_friends":   fmt.Sprintf("MATCH (u:%s {id: $user_id})-[:%s]->(f:%s) RETURN f", uL, friendR, uL),
+				"mutual_friends": fmt.Sprintf("MATCH (u1:%s {id: $user_a})-[:%s]->(m:%s)<-[:%s]-(u2:%s {id: $user_b}) RETURN m", uL, friendR, uL, friendR, uL),
 			},
-			"notes": "Two-way friend model with explicit request/accept lifecycle",
+			"notes":             "Two-way friend model with explicit request/accept lifecycle",
+			"config_labels":     map[string]string{"user": uL},
+			"config_rel_types":  map[string]string{"friend": friendR, "friend_request": friendReqR},
+			"permission_levels": cfg.PermissionLevels,
 		}, nil
 	case "forum_post", "forum", "post":
 		return map[string]interface{}{
@@ -507,64 +554,90 @@ func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) 
 			"strategy": "social_network_preset_model",
 			"preset":   "forum_post",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-				"CREATE CONSTRAINT forum_id_unique IF NOT EXISTS FOR (f:Forum) REQUIRE f.id IS UNIQUE",
-				"CREATE CONSTRAINT post_id_unique IF NOT EXISTS FOR (p:Post) REQUIRE p.id IS UNIQUE",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (f:%s) REQUIRE f.id IS UNIQUE", forumLC, forumL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (p:%s) REQUIRE p.id IS UNIQUE", postLC, postL),
 			},
 			"queries": map[string]string{
-				"create_forum":   "MERGE (f:Forum {id: $forum_id}) SET f.name = coalesce($name, f.name), f.created_at = coalesce(f.created_at, datetime()) RETURN f",
-				"join_forum":     "MATCH (u:User {id: $user_id}), (f:Forum {id: $forum_id}) MERGE (u)-[r:MEMBER_OF]->(f) SET r.joined_at = coalesce(r.joined_at, datetime()) RETURN u, r, f",
-				"create_post":    "MATCH (u:User {id: $author_id}), (f:Forum {id: $forum_id}) MERGE (p:Post {id: $post_id}) SET p.title = $title, p.content = $content, p.created_at = datetime() MERGE (u)-[:AUTHORED]->(p) MERGE (p)-[:POSTED_IN]->(f) RETURN p",
-				"reply_post":     "MATCH (u:User {id: $author_id}), (p:Post {id: $post_id}) MERGE (c:Comment {id: $comment_id}) SET c.content = $content, c.created_at = datetime() MERGE (u)-[:AUTHORED]->(c) MERGE (c)-[:REPLY_TO]->(p) RETURN c",
-				"like_post":      "MATCH (u:User {id: $user_id}), (p:Post {id: $post_id}) MERGE (u)-[l:LIKES_POST]->(p) SET l.created_at = coalesce(l.created_at, datetime()) RETURN u, l, p",
-				"hot_posts":      "MATCH (p:Post)-[:POSTED_IN]->(f:Forum {id: $forum_id}) OPTIONAL MATCH (:User)-[l:LIKES_POST]->(p) WITH p, count(l) AS likes RETURN p, likes ORDER BY likes DESC, p.created_at DESC LIMIT $limit",
-				"forum_timeline": "MATCH (u:User {id: $user_id})-[:MEMBER_OF]->(f:Forum)<-[:POSTED_IN]-(p:Post) RETURN p, f ORDER BY p.created_at DESC LIMIT $limit",
+				"create_forum":   fmt.Sprintf("MERGE (f:%s {id: $forum_id}) SET f.name = coalesce($name, f.name), f.created_at = coalesce(f.created_at, datetime()) RETURN f", forumL),
+				"join_forum":     fmt.Sprintf("MATCH (u:%s {id: $user_id}), (f:%s {id: $forum_id}) MERGE (u)-[r:%s]->(f) SET r.joined_at = coalesce(r.joined_at, datetime()) RETURN u, r, f", uL, forumL, memberOfR),
+				"create_post":    fmt.Sprintf("MATCH (u:%s {id: $author_id}), (f:%s {id: $forum_id}) MERGE (p:%s {id: $post_id}) SET p.title = $title, p.content = $content, p.created_at = datetime() MERGE (u)-[:%s]->(p) MERGE (p)-[:POSTED_IN]->(f) RETURN p", uL, forumL, postL, authoredR),
+				"reply_post":     fmt.Sprintf("MATCH (u:%s {id: $author_id}), (p:%s {id: $post_id}) MERGE (c:%s {id: $comment_id}) SET c.content = $content, c.created_at = datetime() MERGE (u)-[:%s]->(c) MERGE (c)-[:REPLY_TO]->(p) RETURN c", uL, postL, commentL, authoredR),
+				"like_post":      fmt.Sprintf("MATCH (u:%s {id: $user_id}), (p:%s {id: $post_id}) MERGE (u)-[l:LIKES_POST]->(p) SET l.created_at = coalesce(l.created_at, datetime()) RETURN u, l, p", uL, postL),
+				"hot_posts":      fmt.Sprintf("MATCH (p:%s)-[:POSTED_IN]->(f:%s {id: $forum_id}) OPTIONAL MATCH (:%s)-[l:LIKES_POST]->(p) WITH p, count(l) AS likes RETURN p, likes ORDER BY likes DESC, p.created_at DESC LIMIT $limit", postL, forumL, uL),
+				"forum_timeline": fmt.Sprintf("MATCH (u:%s {id: $user_id})-[:%s]->(f:%s)<-[:POSTED_IN]-(p:%s) RETURN p, f ORDER BY p.created_at DESC LIMIT $limit", uL, memberOfR, forumL, postL),
 			},
-			"notes": "Forum domain model with post/comment/like relationships for community products",
+			"notes":             "Forum domain model with post/comment/like relationships for community products",
+			"config_labels":     map[string]string{"user": uL, "forum": forumL, "post": postL, "comment": commentL},
+			"config_rel_types":  map[string]string{"member_of": memberOfR, "authored": authoredR},
+			"permission_levels": cfg.PermissionLevels,
 		}, nil
 	case "one_to_one_chat", "direct_chat", "dm":
+		sendMsgCondition := a.directChatCondition(cfg, "a", "b")
+		canChatCondition := a.directChatCondition(cfg, "a", "b")
 		return map[string]interface{}{
 			"engine":   "neo4j",
 			"strategy": "social_network_preset_model",
 			"preset":   "one_to_one_chat",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-				"CREATE CONSTRAINT chat_message_id_unique IF NOT EXISTS FOR (m:ChatMessage) REQUIRE m.id IS UNIQUE",
-				"CREATE FULLTEXT INDEX chat_message_fulltext IF NOT EXISTS FOR (m:ChatMessage) ON EACH [m.content]",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (m:%s) REQUIRE m.id IS UNIQUE", msgLC, msgL),
+				fmt.Sprintf("CREATE FULLTEXT INDEX %s IF NOT EXISTS FOR (m:%s) ON EACH [m.content]", ftIndex, msgL),
 			},
 			"queries": map[string]string{
-				"send_direct_message": "MATCH (a:User {id: $from_id}), (b:User {id: $to_id}) WHERE ((a)-[:FRIEND]->(b) AND (b)-[:FRIEND]->(a)) OR ((a)-[:FOLLOWS]->(b) AND (b)-[:FOLLOWS]->(a)) CREATE (m:ChatMessage {id: $message_id, content: $content, created_at: datetime()}) MERGE (a)-[:SENT]->(m) MERGE (m)-[:TO]->(b) RETURN m",
-				"list_direct_messages": "MATCH (s:User)-[:SENT]->(m:ChatMessage)-[:TO]->(r:User) WHERE (s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a) RETURN m, s, r ORDER BY m.created_at DESC LIMIT $limit",
-				"search_direct_messages": "CALL db.index.fulltext.queryNodes('chat_message_fulltext', $query) YIELD node, score MATCH (s:User)-[:SENT]->(node:ChatMessage)-[:TO]->(r:User) WHERE (s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a) RETURN node AS m, s, r, score ORDER BY score DESC, m.created_at DESC LIMIT $limit",
-				"search_direct_messages_advanced": "CALL db.index.fulltext.queryNodes('chat_message_fulltext', $query) YIELD node, score MATCH (s:User)-[:SENT]->(node:ChatMessage)-[:TO]->(r:User) WHERE ((s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a)) AND node.deleted_at IS NULL AND ($start_at = '' OR node.created_at >= datetime($start_at)) AND ($end_at = '' OR node.created_at <= datetime($end_at)) OPTIONAL MATCH (node)-[:AT]->(mu:User {id: $mentioned_user_id}) WITH node AS m, s, r, score, CASE WHEN $mentioned_user_id = '' THEN 0.0 WHEN mu IS NULL THEN 0.0 ELSE 0.5 END AS mention_boost RETURN m, s, r, score, mention_boost, score + mention_boost AS rank_score ORDER BY rank_score DESC, m.created_at DESC LIMIT $limit",
-				"can_chat_check":      "MATCH (a:User {id: $from_id}), (b:User {id: $to_id}) RETURN ((a)-[:FRIEND]->(b) AND (b)-[:FRIEND]->(a)) OR ((a)-[:FOLLOWS]->(b) AND (b)-[:FOLLOWS]->(a)) AS can_chat",
-				"reference_message":   "MATCH (m:ChatMessage {id: $message_id}), (ref:ChatMessage {id: $ref_message_id}) MERGE (m)-[:REF]->(ref) RETURN m, ref",
+				"send_direct_message":             fmt.Sprintf("MATCH (a:%s {id: $from_id}), (b:%s {id: $to_id}) WHERE %s CREATE (m:%s {id: $message_id, content: $content, created_at: datetime()}) MERGE (a)-[:%s]->(m) MERGE (m)-[:TO]->(b) RETURN m", uL, uL, sendMsgCondition, msgL, sentR),
+				"list_direct_messages":            fmt.Sprintf("MATCH (s:%s)-[:%s]->(m:%s)-[:TO]->(r:%s) WHERE (s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a) RETURN m, s, r ORDER BY m.created_at DESC LIMIT $limit", uL, sentR, msgL, uL),
+				"search_direct_messages":          fmt.Sprintf("CALL db.index.fulltext.queryNodes('%s', $query) YIELD node, score MATCH (s:%s)-[:%s]->(node:%s)-[:TO]->(r:%s) WHERE (s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a) RETURN node AS m, s, r, score ORDER BY score DESC, m.created_at DESC LIMIT $limit", ftIndex, uL, sentR, msgL, uL),
+				"search_direct_messages_advanced": fmt.Sprintf("CALL db.index.fulltext.queryNodes('%s', $query) YIELD node, score MATCH (s:%s)-[:%s]->(node:%s)-[:TO]->(r:%s) WHERE ((s.id = $user_a AND r.id = $user_b) OR (s.id = $user_b AND r.id = $user_a)) AND node.deleted_at IS NULL AND ($start_at = '' OR node.created_at >= datetime($start_at)) AND ($end_at = '' OR node.created_at <= datetime($end_at)) OPTIONAL MATCH (node)-[:AT]->(mu:%s {id: $mentioned_user_id}) WITH node AS m, s, r, score, CASE WHEN $mentioned_user_id = '' THEN 0.0 WHEN mu IS NULL THEN 0.0 ELSE 0.5 END AS mention_boost RETURN m, s, r, score, mention_boost, score + mention_boost AS rank_score ORDER BY rank_score DESC, m.created_at DESC LIMIT $limit", ftIndex, uL, sentR, msgL, uL, uL),
+				"can_chat_check":                  fmt.Sprintf("MATCH (a:%s {id: $from_id}), (b:%s {id: $to_id}) RETURN %s AS can_chat", uL, uL, canChatCondition),
+				"reference_message":               fmt.Sprintf("MATCH (m:%s {id: $message_id}), (ref:%s {id: $ref_message_id}) MERGE (m)-[:REF]->(ref) RETURN m, ref", msgL, msgL),
 			},
-			"notes": "Direct chat is allowed only when users have bidirectional FRIEND or mutual FOLLOWS; message is a middle node connecting sender and receiver",
+			"notes":                  "Direct chat permission is controlled by direct_chat_permission config; message is a middle node connecting sender and receiver",
+			"direct_chat_permission": cfg.DirectChatPermission,
+			"config_labels":          map[string]string{"user": uL, "chat_message": msgL},
+			"config_rel_types":       map[string]string{"sent": sentR, "follows": followsR, "friend": friendR},
+			"fulltext_index":         ftIndex,
+			"permission_levels":      cfg.PermissionLevels,
 		}, nil
 	case "group_chat_room", "group_chat", "chat_room":
+		joinRoomStrategy := cfg.JoinRoomStrategy
+		var requestJoinQuery, approveJoinQuery string
+		if joinRoomStrategy == "open" {
+			// 开放模式：直接加入，无需审批
+			requestJoinQuery = fmt.Sprintf("MATCH (u:%s {id: $user_id}), (room:%s {id: $room_id}) MERGE (u)-[in1:%s]->(room) SET in1.status = 'approved', in1.joined_at = coalesce(in1.joined_at, datetime()) MERGE (room)-[in2:%s]->(u) SET in2.status = 'approved', in2.joined_at = coalesce(in2.joined_at, datetime()) RETURN u, room", uL, roomL, inRoomR, inRoomR)
+			approveJoinQuery = fmt.Sprintf("RETURN 'not_applicable_in_open_mode' AS status")
+		} else {
+			// 审批模式（默认）
+			requestJoinQuery = fmt.Sprintf("MATCH (u:%s {id: $user_id}), (room:%s {id: $room_id}) MERGE (u)-[req:%s]->(room) SET req.status = coalesce(req.status, 'requested'), req.created_at = coalesce(req.created_at, datetime()) RETURN u, req, room", uL, roomL, inRoomR)
+			approveJoinQuery = fmt.Sprintf("MATCH (u:%s {id: $user_id})-[req:%s]->(room:%s {id: $room_id}) SET req.status = 'approved', req.approved_at = datetime() MERGE (room)-[inback:%s]->(u) SET inback.status = 'approved', inback.approved_at = coalesce(inback.approved_at, datetime()) RETURN u, room", uL, inRoomR, roomL, inRoomR)
+		}
 		return map[string]interface{}{
 			"engine":   "neo4j",
 			"strategy": "social_network_preset_model",
 			"preset":   "group_chat_room",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-				"CREATE CONSTRAINT chat_room_id_unique IF NOT EXISTS FOR (r:ChatRoom) REQUIRE r.id IS UNIQUE",
-				"CREATE CONSTRAINT chat_message_id_unique IF NOT EXISTS FOR (m:ChatMessage) REQUIRE m.id IS UNIQUE",
-				"CREATE FULLTEXT INDEX chat_message_fulltext IF NOT EXISTS FOR (m:ChatMessage) ON EACH [m.content]",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (r:%s) REQUIRE r.id IS UNIQUE", roomLC, roomL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (m:%s) REQUIRE m.id IS UNIQUE", msgLC, msgL),
+				fmt.Sprintf("CREATE FULLTEXT INDEX %s IF NOT EXISTS FOR (m:%s) ON EACH [m.content]", ftIndex, msgL),
 			},
 			"queries": map[string]string{
-				"create_room":         "MATCH (creator:User {id: $creator_id}) MERGE (room:ChatRoom {id: $room_id}) SET room.name = coalesce($name, coalesce(room.name, 'room')), room.created_at = coalesce(room.created_at, datetime()) MERGE (creator)-[:CREATED]->(room) MERGE (creator)-[:IN]->(room) MERGE (room)-[:IN]->(creator) RETURN room, creator",
-				"request_join_room":   "MATCH (u:User {id: $user_id}), (room:ChatRoom {id: $room_id}) MERGE (u)-[req:IN]->(room) SET req.status = coalesce(req.status, 'requested'), req.created_at = coalesce(req.created_at, datetime()) RETURN u, req, room",
-				"approve_join_room":   "MATCH (u:User {id: $user_id})-[req:IN]->(room:ChatRoom {id: $room_id}) SET req.status = 'approved', req.approved_at = datetime() MERGE (room)-[inback:IN]->(u) SET inback.status = 'approved', inback.approved_at = coalesce(inback.approved_at, datetime()) RETURN u, room",
-				"send_room_message":   "MATCH (u:User {id: $user_id})-[in1:IN]->(room:ChatRoom {id: $room_id})-[in2:IN]->(u) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' CREATE (m:ChatMessage {id: $message_id, content: $content, created_at: datetime()}) MERGE (u)-[:SENT]->(m) MERGE (m)-[:IN_ROOM]->(room) RETURN m, room",
-				"at_user":            "MATCH (m:ChatMessage {id: $message_id}), (u:User {id: $mentioned_user_id}) MERGE (m)-[:AT]->(u) RETURN m, u",
-				"ref_message":        "MATCH (m:ChatMessage {id: $message_id}), (ref:ChatMessage {id: $ref_message_id}) MERGE (m)-[:REF]->(ref) RETURN m, ref",
-				"list_room_messages": "MATCH (room:ChatRoom {id: $room_id})<-[:IN_ROOM]-(m:ChatMessage)<-[:SENT]-(u:User) RETURN m, u ORDER BY m.created_at DESC LIMIT $limit",
-				"search_room_messages": "CALL db.index.fulltext.queryNodes('chat_message_fulltext', $query) YIELD node, score MATCH (room:ChatRoom {id: $room_id})<-[:IN_ROOM]-(node:ChatMessage)<-[:SENT]-(u:User) RETURN node AS m, u, room, score ORDER BY score DESC, m.created_at DESC LIMIT $limit",
-				"search_room_messages_advanced": "CALL db.index.fulltext.queryNodes('chat_message_fulltext', $query) YIELD node, score MATCH (room:ChatRoom {id: $room_id})<-[:IN_ROOM]-(node:ChatMessage)<-[:SENT]-(u:User) WHERE node.deleted_at IS NULL AND ($start_at = '' OR node.created_at >= datetime($start_at)) AND ($end_at = '' OR node.created_at <= datetime($end_at)) OPTIONAL MATCH (node)-[:AT]->(mu:User {id: $mentioned_user_id}) WITH node AS m, u, room, score, CASE WHEN $mentioned_user_id = '' THEN 0.0 WHEN mu IS NULL THEN 0.0 ELSE 0.5 END AS mention_boost RETURN m, u, room, score, mention_boost, score + mention_boost AS rank_score ORDER BY rank_score DESC, m.created_at DESC LIMIT $limit",
+				"create_room":                   fmt.Sprintf("MATCH (creator:%s {id: $creator_id}) MERGE (room:%s {id: $room_id}) SET room.name = coalesce($name, coalesce(room.name, 'room')), room.created_at = coalesce(room.created_at, datetime()) MERGE (creator)-[:%s]->(room) MERGE (creator)-[:%s]->(room) MERGE (room)-[:%s]->(creator) RETURN room, creator", uL, roomL, createdR, inRoomR, inRoomR),
+				"request_join_room":             requestJoinQuery,
+				"approve_join_room":             approveJoinQuery,
+				"send_room_message":             fmt.Sprintf("MATCH (u:%s {id: $user_id})-[in1:%s]->(room:%s {id: $room_id})-[in2:%s]->(u) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' CREATE (m:%s {id: $message_id, content: $content, created_at: datetime()}) MERGE (u)-[:%s]->(m) MERGE (m)-[:%s]->(room) RETURN m, room", uL, inRoomR, roomL, inRoomR, msgL, sentR, inRoomMsgR),
+				"at_user":                       fmt.Sprintf("MATCH (m:%s {id: $message_id}), (u:%s {id: $mentioned_user_id}) MERGE (m)-[:AT]->(u) RETURN m, u", msgL, uL),
+				"ref_message":                   fmt.Sprintf("MATCH (m:%s {id: $message_id}), (ref:%s {id: $ref_message_id}) MERGE (m)-[:REF]->(ref) RETURN m, ref", msgL, msgL),
+				"list_room_messages":            fmt.Sprintf("MATCH (room:%s {id: $room_id})<-[:%s]-(m:%s)<-[:%s]-(u:%s) RETURN m, u ORDER BY m.created_at DESC LIMIT $limit", roomL, inRoomMsgR, msgL, sentR, uL),
+				"search_room_messages":          fmt.Sprintf("CALL db.index.fulltext.queryNodes('%s', $query) YIELD node, score MATCH (room:%s {id: $room_id})<-[:%s]-(node:%s)<-[:%s]-(u:%s) RETURN node AS m, u, room, score ORDER BY score DESC, m.created_at DESC LIMIT $limit", ftIndex, roomL, inRoomMsgR, msgL, sentR, uL),
+				"search_room_messages_advanced": fmt.Sprintf("CALL db.index.fulltext.queryNodes('%s', $query) YIELD node, score MATCH (room:%s {id: $room_id})<-[:%s]-(node:%s)<-[:%s]-(u:%s) WHERE node.deleted_at IS NULL AND ($start_at = '' OR node.created_at >= datetime($start_at)) AND ($end_at = '' OR node.created_at <= datetime($end_at)) OPTIONAL MATCH (node)-[:AT]->(mu:%s {id: $mentioned_user_id}) WITH node AS m, u, room, score, CASE WHEN $mentioned_user_id = '' THEN 0.0 WHEN mu IS NULL THEN 0.0 ELSE 0.5 END AS mention_boost RETURN m, u, room, score, mention_boost, score + mention_boost AS rank_score ORDER BY rank_score DESC, m.created_at DESC LIMIT $limit", ftIndex, roomL, inRoomMsgR, msgL, sentR, uL, uL),
 			},
-			"notes": "Group chat room uses ChatRoom unit with creator relation; bidirectional IN means active member, one-way IN means join request. @ and ref are modeled as AT and REF relations.",
+			"notes":              "Group chat room model; join strategy and permission levels are configurable",
+			"join_room_strategy": joinRoomStrategy,
+			"config_labels":      map[string]string{"user": uL, "chat_room": roomL, "chat_message": msgL},
+			"config_rel_types":   map[string]string{"created": createdR, "in_room": inRoomR, "in_room_msg": inRoomMsgR, "sent": sentR},
+			"fulltext_index":     ftIndex,
+			"permission_levels":  cfg.PermissionLevels,
 		}, nil
 	case "chat_receipt", "receipt", "message_receipt":
 		return map[string]interface{}{
@@ -572,36 +645,53 @@ func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) 
 			"strategy": "social_network_preset_model",
 			"preset":   "chat_receipt",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-				"CREATE CONSTRAINT chat_message_id_unique IF NOT EXISTS FOR (m:ChatMessage) REQUIRE m.id IS UNIQUE",
-				"CREATE FULLTEXT INDEX chat_message_fulltext IF NOT EXISTS FOR (m:ChatMessage) ON EACH [m.content]",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (m:%s) REQUIRE m.id IS UNIQUE", msgLC, msgL),
+				fmt.Sprintf("CREATE FULLTEXT INDEX %s IF NOT EXISTS FOR (m:%s) ON EACH [m.content]", ftIndex, msgL),
 			},
 			"queries": map[string]string{
-				"mark_direct_message_read": "MATCH (u:User {id: $user_id}), (m:ChatMessage {id: $message_id})-[:TO]->(u) MERGE (u)-[r:READ_BY]->(m) SET r.read_at = coalesce(r.read_at, datetime()) RETURN u, m, r",
-				"mark_room_message_read":   "MATCH (u:User {id: $user_id})-[in1:IN]->(room:ChatRoom)<-[in2:IN]-(u), (m:ChatMessage {id: $message_id})-[:IN_ROOM]->(room) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' MERGE (u)-[r:READ_BY]->(m) SET r.read_at = coalesce(r.read_at, datetime()) RETURN u, m, r",
-				"list_direct_unread":       "MATCH (sender:User {id: $peer_id})-[:SENT]->(m:ChatMessage)-[:TO]->(u:User {id: $user_id}) WHERE NOT (u)-[:READ_BY]->(m) RETURN m, sender ORDER BY m.created_at DESC LIMIT $limit",
-				"list_room_unread":         "MATCH (u:User {id: $user_id})-[in1:IN]->(room:ChatRoom)<-[in2:IN]-(u), (sender:User)-[:SENT]->(m:ChatMessage)-[:IN_ROOM]->(room) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' AND NOT (u)-[:READ_BY]->(m) RETURN m, sender, room ORDER BY m.created_at DESC LIMIT $limit",
+				"mark_direct_message_read": fmt.Sprintf("MATCH (u:%s {id: $user_id}), (m:%s {id: $message_id})-[:TO]->(u) MERGE (u)-[r:%s]->(m) SET r.read_at = coalesce(r.read_at, datetime()) RETURN u, m, r", uL, msgL, readByR),
+				"mark_room_message_read":   fmt.Sprintf("MATCH (u:%s {id: $user_id})-[in1:%s]->(room:%s)<-[in2:%s]-(u), (m:%s {id: $message_id})-[:%s]->(room) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' MERGE (u)-[r:%s]->(m) SET r.read_at = coalesce(r.read_at, datetime()) RETURN u, m, r", uL, inRoomR, roomL, inRoomR, msgL, inRoomMsgR, readByR),
+				"list_direct_unread":       fmt.Sprintf("MATCH (sender:%s {id: $peer_id})-[:%s]->(m:%s)-[:TO]->(u:%s {id: $user_id}) WHERE NOT (u)-[:%s]->(m) RETURN m, sender ORDER BY m.created_at DESC LIMIT $limit", uL, sentR, msgL, uL, readByR),
+				"list_room_unread":         fmt.Sprintf("MATCH (u:%s {id: $user_id})-[in1:%s]->(room:%s)<-[in2:%s]-(u), (sender:%s)-[:%s]->(m:%s)-[:%s]->(room) WHERE coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' AND NOT (u)-[:%s]->(m) RETURN m, sender, room ORDER BY m.created_at DESC LIMIT $limit", uL, inRoomR, roomL, inRoomR, uL, sentR, msgL, inRoomMsgR, readByR),
 			},
-			"notes": "Read receipt preset models message acknowledgment using READ_BY relation for both direct chat and room chat",
+			"notes":             "Read receipt preset models message acknowledgment using READ_BY relation for both direct chat and room chat",
+			"config_labels":     map[string]string{"user": uL, "chat_room": roomL, "chat_message": msgL},
+			"config_rel_types":  map[string]string{"read_by": readByR, "sent": sentR, "in_room": inRoomR, "in_room_msg": inRoomMsgR},
+			"permission_levels": cfg.PermissionLevels,
 		}, nil
 	case "chat_moderation", "moderation", "room_moderation":
+		// 构建管理员检查条件（多个关系类型OR）
+		modRelConditions := make([]string, 0, len(cfg.ModerationRelTypes))
+		for _, relType := range cfg.ModerationRelTypes {
+			modRelConditions = append(modRelConditions, fmt.Sprintf("(operator)-[:%s]->(room)", relType))
+		}
+		modCheck := strings.Join(modRelConditions, " OR ")
+		if modCheck == "" {
+			modCheck = fmt.Sprintf("(operator)-[:%s]->(room)", createdR)
+		}
+		modActionTypes := strings.Join([]string{mutedR, bannedR}, "|")
 		return map[string]interface{}{
 			"engine":   "neo4j",
 			"strategy": "social_network_preset_model",
 			"preset":   "chat_moderation",
 			"constraints": []string{
-				"CREATE CONSTRAINT user_id_unique IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE",
-				"CREATE CONSTRAINT chat_room_id_unique IF NOT EXISTS FOR (r:ChatRoom) REQUIRE r.id IS UNIQUE",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (u:%s) REQUIRE u.id IS UNIQUE", uLC, uL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (r:%s) REQUIRE r.id IS UNIQUE", roomLC, roomL),
 			},
 			"queries": map[string]string{
-				"mute_member":            "MATCH (operator:User {id: $operator_id})-[:CREATED]->(room:ChatRoom {id: $room_id}), (target:User {id: $target_id}) MERGE (target)-[mu:MUTED_IN]->(room) SET mu.reason = $reason, mu.until_at = $until_at, mu.updated_at = datetime() RETURN target, room, mu",
-				"unmute_member":          "MATCH (operator:User {id: $operator_id})-[:CREATED]->(room:ChatRoom {id: $room_id}) MATCH (target:User {id: $target_id})-[mu:MUTED_IN]->(room) DELETE mu RETURN target, room",
-				"ban_member":             "MATCH (operator:User {id: $operator_id})-[:CREATED]->(room:ChatRoom {id: $room_id}), (target:User {id: $target_id}) MERGE (target)-[ban:BANNED_IN]->(room) SET ban.reason = $reason, ban.created_at = coalesce(ban.created_at, datetime()) WITH target, room OPTIONAL MATCH (target)-[in1:IN]->(room) DELETE in1 WITH target, room OPTIONAL MATCH (room)-[in2:IN]->(target) DELETE in2 RETURN target, room, ban",
-				"unban_member":           "MATCH (operator:User {id: $operator_id})-[:CREATED]->(room:ChatRoom {id: $room_id}) MATCH (target:User {id: $target_id})-[ban:BANNED_IN]->(room) DELETE ban RETURN target, room",
-				"can_send_room_message":  "MATCH (u:User {id: $user_id}), (room:ChatRoom {id: $room_id}) OPTIONAL MATCH (u)-[in1:IN]->(room) OPTIONAL MATCH (room)-[in2:IN]->(u) OPTIONAL MATCH (u)-[ban:BANNED_IN]->(room) OPTIONAL MATCH (u)-[mu:MUTED_IN]->(room) RETURN in1 IS NOT NULL AND in2 IS NOT NULL AND coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' AND ban IS NULL AND (mu IS NULL OR mu.until_at IS NULL OR datetime(mu.until_at) < datetime()) AS can_send",
-				"list_moderation_actions": "MATCH (u:User)-[r:MUTED_IN|BANNED_IN]->(room:ChatRoom {id: $room_id}) RETURN u, type(r) AS action, r ORDER BY coalesce(r.updated_at, r.created_at) DESC LIMIT $limit",
+				"mute_member":             fmt.Sprintf("MATCH (operator:%s {id: $operator_id}), (room:%s {id: $room_id}), (target:%s {id: $target_id}) WHERE %s MERGE (target)-[mu:%s]->(room) SET mu.reason = $reason, mu.until_at = $until_at, mu.updated_at = datetime() RETURN target, room, mu", uL, roomL, uL, modCheck, mutedR),
+				"unmute_member":           fmt.Sprintf("MATCH (operator:%s {id: $operator_id}), (room:%s {id: $room_id}) WHERE %s MATCH (target:%s {id: $target_id})-[mu:%s]->(room) DELETE mu RETURN target, room", uL, roomL, modCheck, uL, mutedR),
+				"ban_member":              fmt.Sprintf("MATCH (operator:%s {id: $operator_id}), (room:%s {id: $room_id}), (target:%s {id: $target_id}) WHERE %s MERGE (target)-[ban:%s]->(room) SET ban.reason = $reason, ban.created_at = coalesce(ban.created_at, datetime()) WITH target, room OPTIONAL MATCH (target)-[in1:%s]->(room) DELETE in1 WITH target, room OPTIONAL MATCH (room)-[in2:%s]->(target) DELETE in2 RETURN target, room, ban", uL, roomL, uL, modCheck, bannedR, inRoomR, inRoomR),
+				"unban_member":            fmt.Sprintf("MATCH (operator:%s {id: $operator_id}), (room:%s {id: $room_id}) WHERE %s MATCH (target:%s {id: $target_id})-[ban:%s]->(room) DELETE ban RETURN target, room", uL, roomL, modCheck, uL, bannedR),
+				"can_send_room_message":   fmt.Sprintf("MATCH (u:%s {id: $user_id}), (room:%s {id: $room_id}) OPTIONAL MATCH (u)-[in1:%s]->(room) OPTIONAL MATCH (room)-[in2:%s]->(u) OPTIONAL MATCH (u)-[ban:%s]->(room) OPTIONAL MATCH (u)-[mu:%s]->(room) RETURN in1 IS NOT NULL AND in2 IS NOT NULL AND coalesce(in1.status, 'approved') <> 'requested' AND coalesce(in2.status, 'approved') <> 'requested' AND ban IS NULL AND (mu IS NULL OR mu.until_at IS NULL OR datetime(mu.until_at) < datetime()) AS can_send", uL, roomL, inRoomR, inRoomR, bannedR, mutedR),
+				"list_moderation_actions": fmt.Sprintf("MATCH (u:%s)-[r:%s]->(room:%s {id: $room_id}) RETURN u, type(r) AS action, r ORDER BY coalesce(r.updated_at, r.created_at) DESC LIMIT $limit", uL, modActionTypes, roomL),
 			},
-			"notes": "Moderation preset models mute/ban policies inside graph relations and exposes safe can_send check for API gating",
+			"notes":                "Moderation preset models mute/ban policies; moderation_rel_types controls who can moderate",
+			"moderation_rel_types": cfg.ModerationRelTypes,
+			"config_labels":        map[string]string{"user": uL, "chat_room": roomL},
+			"config_rel_types":     map[string]string{"muted_in": mutedR, "banned_in": bannedR, "in_room": inRoomR},
+			"permission_levels":    cfg.PermissionLevels,
 		}, nil
 	case "message_emoji", "chat_emoji", "emoji_placeholder":
 		return map[string]interface{}{
@@ -609,27 +699,45 @@ func buildNeo4jSocialPresetModel(preset string) (map[string]interface{}, error) 
 			"strategy": "social_network_preset_model",
 			"preset":   "message_emoji",
 			"constraints": []string{
-				"CREATE CONSTRAINT chat_message_id_unique IF NOT EXISTS FOR (m:ChatMessage) REQUIRE m.id IS UNIQUE",
-				"CREATE CONSTRAINT emoji_id_unique IF NOT EXISTS FOR (e:Emoji) REQUIRE e.id IS UNIQUE",
-				"CREATE INDEX emoji_symbol_index IF NOT EXISTS FOR (e:Emoji) ON (e.symbol)",
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (m:%s) REQUIRE m.id IS UNIQUE", msgLC, msgL),
+				fmt.Sprintf("CREATE CONSTRAINT %s_id_unique IF NOT EXISTS FOR (e:%s) REQUIRE e.id IS UNIQUE", emojiLC, emojiL),
+				fmt.Sprintf("CREATE INDEX %s_symbol_index IF NOT EXISTS FOR (e:%s) ON (e.symbol)", emojiLC, emojiL),
 			},
 			"queries": map[string]string{
-				"upsert_emoji":                "MERGE (e:Emoji {id: $emoji_id}) SET e.symbol = coalesce($symbol, e.symbol), e.name = coalesce($name, e.name), e.updated_at = datetime() RETURN e",
-				"attach_emoji_to_message":     "MATCH (m:ChatMessage {id: $message_id}), (e:Emoji {id: $emoji_id}) MERGE (e)-[r:INCLUDED_BY {index: $index}]->(m) SET r.updated_at = datetime() RETURN e, r, m",
-				"detach_emoji_from_message":   "MATCH (e:Emoji {id: $emoji_id})-[r:INCLUDED_BY {index: $index}]->(m:ChatMessage {id: $message_id}) DELETE r RETURN e, m",
-				"list_message_emojis":         "MATCH (e:Emoji)-[r:INCLUDED_BY]->(m:ChatMessage {id: $message_id}) RETURN r.index AS index, e.id AS emoji_id, e.symbol AS symbol, e.name AS name ORDER BY index ASC",
-				"render_message_emoji_payload": "MATCH (m:ChatMessage {id: $message_id}) OPTIONAL MATCH (e:Emoji)-[r:INCLUDED_BY]->(m) RETURN m.id AS message_id, m.content AS template_content, collect({index: r.index, emoji_id: e.id, symbol: e.symbol, name: e.name}) AS emojis",
+				"upsert_emoji":                 fmt.Sprintf("MERGE (e:%s {id: $emoji_id}) SET e.symbol = coalesce($symbol, e.symbol), e.name = coalesce($name, e.name), e.updated_at = datetime() RETURN e", emojiL),
+				"attach_emoji_to_message":      fmt.Sprintf("MATCH (m:%s {id: $message_id}), (e:%s {id: $emoji_id}) MERGE (e)-[r:INCLUDED_BY {index: $index}]->(m) SET r.updated_at = datetime() RETURN e, r, m", msgL, emojiL),
+				"detach_emoji_from_message":    fmt.Sprintf("MATCH (e:%s {id: $emoji_id})-[r:INCLUDED_BY {index: $index}]->(m:%s {id: $message_id}) DELETE r RETURN e, m", emojiL, msgL),
+				"list_message_emojis":          fmt.Sprintf("MATCH (e:%s)-[r:INCLUDED_BY]->(m:%s {id: $message_id}) RETURN r.index AS index, e.id AS emoji_id, e.symbol AS symbol, e.name AS name ORDER BY index ASC", emojiL, msgL),
+				"render_message_emoji_payload": fmt.Sprintf("MATCH (m:%s {id: $message_id}) OPTIONAL MATCH (e:%s)-[r:INCLUDED_BY]->(m) RETURN m.id AS message_id, m.content AS template_content, collect({index: r.index, emoji_id: e.id, symbol: e.symbol, name: e.name}) AS emojis", msgL, emojiL),
 			},
-			"notes": "Message can embed emoji placeholders like {{0}}. INCLUDED_BY relation points from static Emoji node to ChatMessage, with index binding placeholder -> emoji.",
+			"notes":             "Message can embed emoji placeholders like {{0}}. INCLUDED_BY relation points from static Emoji node to ChatMessage.",
+			"config_labels":     map[string]string{"chat_message": msgL, "emoji": emojiL},
+			"permission_levels": cfg.PermissionLevels,
 		}, nil
 	default:
 		return nil, fmt.Errorf("neo4j social preset model not supported: %s", preset)
 	}
 }
 
-func buildNeo4jSocialModelExecutor(ctx context.Context, driver neo4j.DriverWithContext, database string, preset string, execute bool) (interface{}, error) {
+// directChatCondition 根据 DirectChatPermission 配置生成私信权限检查 Cypher 条件。
+func (a *Neo4jAdapter) directChatCondition(cfg *Neo4jSocialNetworkConfig, fromVar, toVar string) string {
+	friendR := cfg.FriendRelType
+	followsR := cfg.FollowsRelType
+	switch strings.ToLower(strings.TrimSpace(cfg.DirectChatPermission)) {
+	case "friends_only":
+		return fmt.Sprintf("(%s)-[:%s]->(%s) AND (%s)-[:%s]->(%s)", fromVar, friendR, toVar, toVar, friendR, fromVar)
+	case "mutual_follow_only":
+		return fmt.Sprintf("(%s)-[:%s]->(%s) AND (%s)-[:%s]->(%s)", fromVar, followsR, toVar, toVar, followsR, fromVar)
+	case "open":
+		return "true"
+	default: // "mutual_follow_or_friend"
+		return fmt.Sprintf("((%s)-[:%s]->(%s) AND (%s)-[:%s]->(%s)) OR ((%s)-[:%s]->(%s) AND (%s)-[:%s]->(%s))", fromVar, friendR, toVar, toVar, friendR, fromVar, fromVar, followsR, toVar, toVar, followsR, fromVar)
+	}
+}
+
+func (a *Neo4jAdapter) buildSocialModelExecutor(ctx context.Context, preset string, execute bool) (interface{}, error) {
 	// 获取预设模型定义
-	modelDef, err := buildNeo4jSocialPresetModel(preset)
+	modelDef, err := a.buildSocialPresetModel(preset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load preset model: %w", err)
 	}
@@ -651,11 +759,11 @@ func buildNeo4jSocialModelExecutor(ctx context.Context, driver neo4j.DriverWithC
 	}
 
 	// 执行constraints和sample queries
-	session := driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: database})
+	session := a.driver.NewSession(ctx, neo4j.SessionConfig{DatabaseName: a.database})
 	defer session.Close(ctx)
 
 	executionResults := make(map[string]interface{})
-	
+
 	// 执行constraints
 	constraintResults := make([]map[string]interface{}, 0, len(constraints))
 	for _, constraint := range constraints {
@@ -720,5 +828,5 @@ func (f *Neo4jFactory) Create(config *Config) (Adapter, error) {
 
 // init 自动注册 Neo4j 适配器。
 func init() {
-	RegisterAdapter(&Neo4jFactory{})
+	MustRegisterAdapterDescriptor("neo4j", newNeo4jAdapterDescriptor())
 }

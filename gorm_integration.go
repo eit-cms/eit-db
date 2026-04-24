@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"fmt"
 
 	"gorm.io/gorm"
 )
@@ -74,15 +73,15 @@ func (a *gormAdapter) GetRawConn() interface{} {
 }
 
 func (a *gormAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
-	return fmt.Errorf("gormAdapter: scheduled tasks not supported")
+	return NewScheduledTaskFallbackErrorWithReason("gorm", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 func (a *gormAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
-	return fmt.Errorf("gormAdapter: scheduled tasks not supported")
+	return NewScheduledTaskFallbackErrorWithReason("gorm", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 func (a *gormAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	return nil, fmt.Errorf("gormAdapter: scheduled tasks not supported")
+	return nil, NewScheduledTaskFallbackErrorWithReason("gorm", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 func (a *gormAdapter) GetQueryBuilderProvider() QueryConstructorProvider {

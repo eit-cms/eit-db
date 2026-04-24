@@ -213,7 +213,53 @@ func (c *Config) ResolvedMongoConfig() *MongoConnectionConfig {
 		defaultHide := true
 		resolved.HideThroughArtifacts = &defaultHide
 	}
+	resolved.LogSystem = resolvedMongoLogSystemConfig(resolved.LogSystem)
 	return resolved
+}
+
+// resolvedMongoLogSystemConfig 返回补全默认值后的日志系统配置。
+func resolvedMongoLogSystemConfig(src *MongoLogSystemConfig) *MongoLogSystemConfig {
+	cfg := &MongoLogSystemConfig{}
+	if src != nil {
+		*cfg = *src
+		if src.ExtraStopWords != nil {
+			cfg.ExtraStopWords = append([]string(nil), src.ExtraStopWords...)
+		}
+		if src.DefaultTokenizationRules != nil {
+			cfg.DefaultTokenizationRules = append([]string(nil), src.DefaultTokenizationRules...)
+		}
+		if src.CustomTokenizationPatterns != nil {
+			cfg.CustomTokenizationPatterns = make(map[string]string, len(src.CustomTokenizationPatterns))
+			for k, v := range src.CustomTokenizationPatterns {
+				cfg.CustomTokenizationPatterns[k] = v
+			}
+		}
+		if src.CustomHotWords != nil {
+			cfg.CustomHotWords = make(map[string]int, len(src.CustomHotWords))
+			for k, v := range src.CustomHotWords {
+				cfg.CustomHotWords[k] = v
+			}
+		}
+	}
+	if cfg.DefaultTopK <= 0 {
+		cfg.DefaultTopK = 20
+	}
+	if cfg.DefaultMinTokenLen <= 0 {
+		cfg.DefaultMinTokenLen = 2
+	}
+	if len(cfg.DefaultTokenizationRules) == 0 {
+		cfg.DefaultTokenizationRules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+	}
+	if strings.TrimSpace(cfg.DefaultLevelField) == "" {
+		cfg.DefaultLevelField = "level"
+	}
+	if strings.TrimSpace(cfg.DefaultTimeField) == "" {
+		cfg.DefaultTimeField = "timestamp"
+	}
+	if strings.TrimSpace(cfg.HotWordCollection) == "" {
+		cfg.HotWordCollection = "eit_log_hot_words"
+	}
+	return cfg
 }
 
 // ResolvedNeo4jConfig 返回 Neo4j 的有效配置。
@@ -236,26 +282,166 @@ func (c *Config) ResolvedNeo4jConfig() *Neo4jConnectionConfig {
 			resolved.URI = strings.TrimSpace(uri)
 		}
 	}
+	// 设置默认值
 	if resolved.Database == "" {
 		resolved.Database = "neo4j"
+	}
+	if resolved.Username == "" {
+		resolved.Username = "neo4j"
+	}
+	if resolved.URI == "" {
+		resolved.URI = "neo4j://localhost:7687"
+	}
+	resolved.SocialNetwork = resolvedNeo4jSocialNetworkConfig(resolved.SocialNetwork)
+	return resolved
+}
+
+// ResolvedRedisConfig 返回 Redis 的有效配置。
+func (c *Config) ResolvedRedisConfig() *RedisConnectionConfig {
+	resolved := &RedisConnectionConfig{}
+	if c != nil && c.Redis != nil {
+		*resolved = *c.Redis
+		if c.Redis.ClusterAddrs != nil {
+			resolved.ClusterAddrs = append([]string(nil), c.Redis.ClusterAddrs...)
+		}
+	}
+	if resolved.URI == "" {
+		if uri, _ := c.Options["uri"].(string); strings.TrimSpace(uri) != "" {
+			resolved.URI = strings.TrimSpace(uri)
+		}
+	}
+	if resolved.Host == "" {
+		resolved.Host = c.Host
+	}
+	if resolved.Port == 0 {
+		resolved.Port = c.Port
+	}
+	if resolved.Password == "" {
+		resolved.Password = c.Password
+	}
+	// 默认值：集群模式不设置 host/port 默认值
+	if !resolved.ClusterMode {
+		if resolved.Host == "" {
+			resolved.Host = "localhost"
+		}
+		if resolved.Port == 0 {
+			resolved.Port = 6379
+		}
 	}
 	return resolved
 }
 
+// resolvedNeo4jSocialNetworkConfig 返回补全默认值后的社交网络配置。
+func resolvedNeo4jSocialNetworkConfig(src *Neo4jSocialNetworkConfig) *Neo4jSocialNetworkConfig {
+	cfg := &Neo4jSocialNetworkConfig{}
+	if src != nil {
+		*cfg = *src
+		if src.ModerationRelTypes != nil {
+			cfg.ModerationRelTypes = append([]string(nil), src.ModerationRelTypes...)
+		}
+		if src.PermissionLevels != nil {
+			cfg.PermissionLevels = append([]string(nil), src.PermissionLevels...)
+		}
+	}
+	// 节点标签默认值
+	if strings.TrimSpace(cfg.UserLabel) == "" {
+		cfg.UserLabel = "User"
+	}
+	if strings.TrimSpace(cfg.ChatRoomLabel) == "" {
+		cfg.ChatRoomLabel = "ChatRoom"
+	}
+	if strings.TrimSpace(cfg.ChatMessageLabel) == "" {
+		cfg.ChatMessageLabel = "ChatMessage"
+	}
+	if strings.TrimSpace(cfg.PostLabel) == "" {
+		cfg.PostLabel = "Post"
+	}
+	if strings.TrimSpace(cfg.CommentLabel) == "" {
+		cfg.CommentLabel = "Comment"
+	}
+	if strings.TrimSpace(cfg.ForumLabel) == "" {
+		cfg.ForumLabel = "Forum"
+	}
+	if strings.TrimSpace(cfg.EmojiLabel) == "" {
+		cfg.EmojiLabel = "Emoji"
+	}
+	// 关系类型默认值
+	if strings.TrimSpace(cfg.FollowsRelType) == "" {
+		cfg.FollowsRelType = "FOLLOWS"
+	}
+	if strings.TrimSpace(cfg.FriendRelType) == "" {
+		cfg.FriendRelType = "FRIEND"
+	}
+	if strings.TrimSpace(cfg.FriendRequestRelType) == "" {
+		cfg.FriendRequestRelType = "FRIEND_REQUEST"
+	}
+	if strings.TrimSpace(cfg.SentRelType) == "" {
+		cfg.SentRelType = "SENT"
+	}
+	if strings.TrimSpace(cfg.MemberOfRelType) == "" {
+		cfg.MemberOfRelType = "MEMBER_OF"
+	}
+	if strings.TrimSpace(cfg.InRoomRelType) == "" {
+		cfg.InRoomRelType = "IN"
+	}
+	if strings.TrimSpace(cfg.InRoomMsgRelType) == "" {
+		cfg.InRoomMsgRelType = "IN_ROOM"
+	}
+	if strings.TrimSpace(cfg.MutedInRelType) == "" {
+		cfg.MutedInRelType = "MUTED_IN"
+	}
+	if strings.TrimSpace(cfg.BannedInRelType) == "" {
+		cfg.BannedInRelType = "BANNED_IN"
+	}
+	if strings.TrimSpace(cfg.ReadByRelType) == "" {
+		cfg.ReadByRelType = "READ_BY"
+	}
+	if strings.TrimSpace(cfg.AuthoredRelType) == "" {
+		cfg.AuthoredRelType = "AUTHORED"
+	}
+	if strings.TrimSpace(cfg.CreatedRelType) == "" {
+		cfg.CreatedRelType = "CREATED"
+	}
+	// 其他默认值
+	if strings.TrimSpace(cfg.ChatMessageFulltextIndex) == "" {
+		cfg.ChatMessageFulltextIndex = "chat_message_fulltext"
+	}
+	if strings.TrimSpace(cfg.JoinRoomStrategy) == "" {
+		cfg.JoinRoomStrategy = "request_approval"
+	}
+	if strings.TrimSpace(cfg.DirectChatPermission) == "" {
+		cfg.DirectChatPermission = "mutual_follow_or_friend"
+	}
+	if len(cfg.ModerationRelTypes) == 0 {
+		cfg.ModerationRelTypes = []string{"CREATED"}
+	}
+	if len(cfg.PermissionLevels) == 0 {
+		cfg.PermissionLevels = []string{"member", "moderator", "admin", "creator"}
+	}
+	return cfg
+}
+
 // LoadConfigFromEnv 按 adapter 从环境变量加载数据库配置。
 //
-// 支持的环境变量：
+// Deprecated: 统一配置入口应通过 Config / NewConfig / LoadConfig 完成，环境变量加载仅作为旧版兼容层保留。
+// 该兼容层不再扩展新能力，计划在下一个 minor 版本移除。
+//
+// 现存支持的环境变量：
 // - PostgreSQL: POSTGRES_DSN 或 POSTGRES_HOST/PORT/USER/PASSWORD/DB/SSLMODE
 // - MySQL: MYSQL_DSN 或 MYSQL_HOST/PORT/USER/PASSWORD/DB
 // - SQL Server: SQLSERVER_DSN 或 SQLSERVER_HOST/PORT/USER/PASSWORD/DB
 // - SQLite: SQLITE_DATABASE 或 SQLITE_PATH
 // - MongoDB: MONGODB_URI + MONGODB_DATABASE/MONGODB_DB
+// - Redis: REDIS_URI 或 REDIS_HOST/PORT/PASSWORD/DB
 func LoadConfigFromEnv(adapter string) (*Config, error) {
 	return LoadConfigFromEnvWithDefaults(adapter, nil)
 }
 
 // LoadConfigFromEnvWithDefaults 按 adapter 从环境变量加载数据库配置，并允许通过 defaults 指定默认值。
 // 环境变量优先级高于 defaults；若设置了 *_DSN，则直接使用 DSN 连接细节。
+//
+// Deprecated: 统一配置入口应通过 Config / NewConfig / LoadConfig 完成，环境变量加载仅作为旧版兼容层保留。
+// 该兼容层不再扩展新能力，计划在下一个 minor 版本移除。
 func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, error) {
 	normalized := strings.ToLower(strings.TrimSpace(adapter))
 	if normalized == "" {
@@ -329,6 +515,47 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 			}
 			resolved.HideThroughArtifacts = &parsed
 		}
+		// 日志系统配置环境变量
+		if resolved.LogSystem == nil {
+			resolved.LogSystem = resolvedMongoLogSystemConfig(nil)
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_DEFAULT_TOP_K")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				resolved.LogSystem.DefaultTopK = parsed
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_DEFAULT_MIN_TOKEN_LEN")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				resolved.LogSystem.DefaultMinTokenLen = parsed
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_DEFAULT_LEVEL_FIELD")); v != "" {
+			resolved.LogSystem.DefaultLevelField = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_DEFAULT_TIME_FIELD")); v != "" {
+			resolved.LogSystem.DefaultTimeField = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_HOT_WORD_COLLECTION")); v != "" {
+			resolved.LogSystem.HotWordCollection = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_TOKENIZATION_RULES")); v != "" {
+			rules := strings.Split(v, ",")
+			cleaned := make([]string, 0, len(rules))
+			for _, r := range rules {
+				r = strings.TrimSpace(r)
+				if r != "" {
+					cleaned = append(cleaned, r)
+				}
+			}
+			if len(cleaned) > 0 {
+				resolved.LogSystem.DefaultTokenizationRules = cleaned
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("MONGODB_LOG_DISABLE_BUILTIN_STOP_WORDS")); v != "" {
+			if parsed, err := strconv.ParseBool(v); err == nil {
+				resolved.LogSystem.DisableBuiltinStopWords = parsed
+			}
+		}
 		config.MongoDB = resolved
 
 	case "neo4j":
@@ -337,7 +564,80 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 		resolved.Username = preferEnvString(firstNonEmptyEnv("NEO4J_USER", "NEO4J_USERNAME"), resolved.Username, "neo4j")
 		resolved.Password = preferEnvString(firstNonEmptyEnv("NEO4J_PASSWORD"), resolved.Password, "")
 		resolved.Database = preferEnvString(firstNonEmptyEnv("NEO4J_DATABASE", "NEO4J_DB"), resolved.Database, "neo4j")
+		// 社交网络配置环境变量
+		if resolved.SocialNetwork == nil {
+			resolved.SocialNetwork = resolvedNeo4jSocialNetworkConfig(nil)
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_USER_LABEL")); v != "" {
+			resolved.SocialNetwork.UserLabel = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_CHAT_ROOM_LABEL")); v != "" {
+			resolved.SocialNetwork.ChatRoomLabel = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_CHAT_MESSAGE_LABEL")); v != "" {
+			resolved.SocialNetwork.ChatMessageLabel = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_FOLLOWS_REL")); v != "" {
+			resolved.SocialNetwork.FollowsRelType = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_FRIEND_REL")); v != "" {
+			resolved.SocialNetwork.FriendRelType = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_JOIN_ROOM_STRATEGY")); v != "" {
+			resolved.SocialNetwork.JoinRoomStrategy = strings.ToLower(v)
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_DIRECT_CHAT_PERMISSION")); v != "" {
+			resolved.SocialNetwork.DirectChatPermission = strings.ToLower(v)
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_CHAT_MESSAGE_FULLTEXT_INDEX")); v != "" {
+			resolved.SocialNetwork.ChatMessageFulltextIndex = v
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_MODERATION_REL_TYPES")); v != "" {
+			relTypes := strings.Split(v, ",")
+			cleaned := make([]string, 0, len(relTypes))
+			for _, r := range relTypes {
+				r = strings.TrimSpace(r)
+				if r != "" {
+					cleaned = append(cleaned, r)
+				}
+			}
+			if len(cleaned) > 0 {
+				resolved.SocialNetwork.ModerationRelTypes = cleaned
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("NEO4J_SOCIAL_PERMISSION_LEVELS")); v != "" {
+			levels := strings.Split(v, ",")
+			cleaned := make([]string, 0, len(levels))
+			for _, l := range levels {
+				l = strings.TrimSpace(l)
+				if l != "" {
+					cleaned = append(cleaned, l)
+				}
+			}
+			if len(cleaned) > 0 {
+				resolved.SocialNetwork.PermissionLevels = cleaned
+			}
+		}
 		config.Neo4j = resolved
+
+	case "redis":
+		resolved := config.ResolvedRedisConfig()
+		resolved.URI = preferEnvString(firstNonEmptyEnv("REDIS_URI"), resolved.URI, "")
+		resolved.Host = preferEnvString(firstNonEmptyEnv("REDIS_HOST"), resolved.Host, "localhost")
+		resolved.Port = preferEnvInt(firstNonEmptyEnv("REDIS_PORT"), resolved.Port, 6379)
+		resolved.Password = preferEnvString(firstNonEmptyEnv("REDIS_PASSWORD"), resolved.Password, "")
+		resolved.Username = preferEnvString(firstNonEmptyEnv("REDIS_USERNAME", "REDIS_USER"), resolved.Username, "")
+		if v := strings.TrimSpace(firstNonEmptyEnv("REDIS_DB")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				resolved.DB = parsed
+			}
+		}
+		if v := strings.TrimSpace(firstNonEmptyEnv("REDIS_TLS_ENABLED")); v != "" {
+			if parsed, err := strconv.ParseBool(v); err == nil {
+				resolved.TLSEnabled = parsed
+			}
+		}
+		config.Redis = resolved
 
 	default:
 		return nil, fmt.Errorf("unsupported adapter: %s", normalized)
@@ -405,11 +705,24 @@ func cloneConfig(src *Config) *Config {
 	}
 	if src.MongoDB != nil {
 		mongoCfg := *src.MongoDB
+		if src.MongoDB.LogSystem != nil {
+			mongoCfg.LogSystem = resolvedMongoLogSystemConfig(src.MongoDB.LogSystem)
+		}
 		clone.MongoDB = &mongoCfg
 	}
 	if src.Neo4j != nil {
 		neo4jCfg := *src.Neo4j
+		if src.Neo4j.SocialNetwork != nil {
+			neo4jCfg.SocialNetwork = resolvedNeo4jSocialNetworkConfig(src.Neo4j.SocialNetwork)
+		}
 		clone.Neo4j = &neo4jCfg
+	}
+	if src.Redis != nil {
+		redisCfg := *src.Redis
+		if src.Redis.ClusterAddrs != nil {
+			redisCfg.ClusterAddrs = append([]string(nil), src.Redis.ClusterAddrs...)
+		}
+		clone.Redis = &redisCfg
 	}
 	return &clone
 }
@@ -477,14 +790,6 @@ func preferEnvBool(envValue string, currentValue, fallback bool) bool {
 		return true
 	}
 	return fallback
-}
-
-func hasDSNOption(config *Config) bool {
-	if config == nil || config.Options == nil {
-		return false
-	}
-	dsn, _ := config.Options["dsn"].(string)
-	return strings.TrimSpace(dsn) != ""
 }
 
 // LoadConfig 从文件加载数据库配置（支持 JSON 和 YAML 格式）
@@ -665,78 +970,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("adapter must be specified")
 	}
 
-	switch c.Adapter {
-	case "sqlite":
-		sqliteCfg := c.ResolvedSQLiteConfig()
-		if strings.TrimSpace(sqliteCfg.Path) == "" && strings.TrimSpace(sqliteCfg.DSN) == "" {
-			return fmt.Errorf("sqlite: database path must be specified")
-		}
-
-	case "postgres", "mysql", "sqlserver":
-		var hasDSN bool
-		var host, username, database string
-		if c.Adapter == "postgres" {
-			cfg := c.ResolvedPostgresConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.Postgres = cfg
-		} else if c.Adapter == "mysql" {
-			cfg := c.ResolvedMySQLConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.MySQL = cfg
-		} else {
-			cfg := c.ResolvedSQLServerConfig()
-			hasDSN = strings.TrimSpace(cfg.DSN) != ""
-			host, username, database = cfg.Host, cfg.Username, cfg.Database
-			c.SQLServer = cfg
-			if cfg.ManyToManyStrategy != "direct_join" && cfg.ManyToManyStrategy != "recursive_cte" {
-				return fmt.Errorf("sqlserver: many_to_many_strategy must be direct_join or recursive_cte")
-			}
-			if cfg.RecursiveCTEDepth <= 0 {
-				return fmt.Errorf("sqlserver: recursive_cte_depth must be greater than 0")
-			}
-			if cfg.RecursiveCTEMaxRecursion <= 0 {
-				return fmt.Errorf("sqlserver: recursive_cte_max_recursion must be greater than 0")
+	if desc, ok := LookupAdapterDescriptor(c.Adapter); ok {
+		if desc.ValidateConfig != nil {
+			if err := desc.ValidateConfig(c); err != nil {
+				return err
 			}
 		}
-		if hasDSN {
-			break
-		}
-		if host == "" {
-			return fmt.Errorf("%s: host must be specified", c.Adapter)
-		}
-		if username == "" {
-			return fmt.Errorf("%s: username must be specified", c.Adapter)
-		}
-		if database == "" {
-			return fmt.Errorf("%s: database name must be specified", c.Adapter)
-		}
-
-	case "mongodb":
-		mongoCfg := c.ResolvedMongoConfig()
-		c.MongoDB = mongoCfg
-		if mongoCfg.Database == "" {
-			return fmt.Errorf("mongodb: database name must be specified")
-		}
-		if strings.TrimSpace(mongoCfg.URI) == "" {
-			return fmt.Errorf("mongodb: uri must be specified")
-		}
-		if mongoCfg.RelationJoinStrategy != "lookup" && mongoCfg.RelationJoinStrategy != "pipeline" {
-			return fmt.Errorf("mongodb: relation_join_strategy must be lookup or pipeline")
-		}
-
-	case "neo4j":
-		neo4jCfg := c.ResolvedNeo4jConfig()
-		c.Neo4j = neo4jCfg
-		if strings.TrimSpace(neo4jCfg.URI) == "" {
-			return fmt.Errorf("neo4j: uri must be specified")
-		}
-		if strings.TrimSpace(neo4jCfg.Username) == "" {
-			return fmt.Errorf("neo4j: username must be specified")
-		}
-
-	default:
+	} else {
 		return fmt.Errorf("unsupported adapter: %s", c.Adapter)
 	}
 
@@ -815,34 +1055,9 @@ func (c *Config) Validate() error {
 
 // DefaultConfig 返回默认配置
 func DefaultConfig(adapterType string) *Config {
-	config := &Config{
-		Adapter: adapterType,
-		Pool: &PoolConfig{
-			MaxConnections: 25,
-			MinConnections: 0,
-			ConnectTimeout: 30,
-			IdleTimeout:    300,
-		},
-	}
-
-	switch adapterType {
-	case "sqlite":
-		config.SQLite = &SQLiteConnectionConfig{Path: "./eit.db"}
-
-	case "postgres":
-		config.Postgres = &PostgresConnectionConfig{Host: "localhost", Port: 5432, Database: "eit", Username: "postgres", Password: "postgres", SSLMode: "disable"}
-
-	case "mysql":
-		config.MySQL = &MySQLConnectionConfig{Host: "localhost", Port: 3306, Database: "eit", Username: "root", Password: "root"}
-
-	case "sqlserver":
-		config.SQLServer = &SQLServerConnectionConfig{Host: "localhost", Port: 1433, Database: "master", Username: "sa", Password: "YourStrong!Passw0rd"}
-
-	case "mongodb":
-		config.MongoDB = &MongoConnectionConfig{URI: "mongodb://localhost:27017", Database: "eit"}
-
-	case "neo4j":
-		config.Neo4j = &Neo4jConnectionConfig{URI: "neo4j://localhost:7687", Username: "neo4j", Password: "neo4j", Database: "neo4j"}
+	config := newDefaultAdapterConfig(adapterType)
+	if desc, ok := LookupAdapterDescriptor(adapterType); ok && desc.DefaultConfig != nil {
+		return desc.DefaultConfig()
 	}
 
 	return config

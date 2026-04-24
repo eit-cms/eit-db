@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,37 @@ type PostgreSQLAdapter struct {
 	config *Config
 	db     *gorm.DB
 	sqlDB  *sql.DB
+}
+
+type postgresScheduledTaskRecord struct {
+	TaskName       string
+	TaskType       string
+	CronExpression string
+	Description    string
+	Enabled        bool
+	ConfigJSON     string
+	FunctionName   string
+	ScheduleMode   string
+	PGCronJobID    sql.NullInt64
+	LastStatus     sql.NullString
+	LastError      sql.NullString
+	LastExecutedAt sql.NullTime
+	NextExecuteAt  sql.NullTime
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type postgresCronJobRuntime struct {
+	Schedule string
+	Command  string
+	Active   bool
+}
+
+type postgresCronJobRunDetail struct {
+	Status        sql.NullString
+	ReturnMessage sql.NullString
+	StartedAt     sql.NullTime
+	FinishedAt    sql.NullTime
 }
 
 // PostgreSQLFactory PostgreSQL 适配器工厂
@@ -345,15 +377,25 @@ func (a *PostgreSQLAdapter) RegisterScheduledTask(ctx context.Context, task *Sch
 
 // registerMonthlyTableCreation 注册按月自动创建表的任务
 func (a *PostgreSQLAdapter) registerMonthlyTableCreation(ctx context.Context, task *ScheduledTaskConfig) error {
+	if err := a.ensureScheduledTaskMetadataTable(ctx); err != nil {
+		return err
+	}
+
+	existingRecord, err := a.getScheduledTaskRecord(ctx, task.Name)
+	if err != nil {
+		return err
+	}
+
 	config := task.GetMonthlyTableConfig()
 
 	tableName, _ := config["tableName"].(string)
 	monthFormat, _ := config["monthFormat"].(string)
 	fieldDefs, _ := config["fieldDefinitions"].(string)
+	functionName := scheduledTaskCreateTableRoutineName(task.Name)
 
 	// 创建存储过程：create_monthly_log_table
 	createProcSQL := fmt.Sprintf(`
-CREATE OR REPLACE FUNCTION %s_create_table()
+CREATE OR REPLACE FUNCTION %s()
 RETURNS void AS $$
 DECLARE
 	new_table_name TEXT;
@@ -372,10 +414,10 @@ BEGIN
 	END IF;
 END;
 $$ LANGUAGE plpgsql;
-	`, task.Name, tableName, monthFormat, fieldDefs)
+	`, a.quoteIdentifier(functionName), tableName, monthFormat, fieldDefs)
 
 	if err := a.db.WithContext(ctx).Exec(createProcSQL).Error; err != nil {
-		return fmt.Errorf("failed to create function %s_create_table: %w", task.Name, err)
+		return fmt.Errorf("failed to create function %s: %w", functionName, err)
 	}
 
 	// 预热当前月份的表
@@ -405,6 +447,85 @@ END $$;
 		return fmt.Errorf("failed to pre-warm tables: %w", err)
 	}
 
+	scheduleMode := "function_only"
+	var pgCronJobID sql.NullInt64
+	pgCronAvailable, err := a.hasPgCronExtension(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to detect pg_cron availability: %w", err)
+	}
+	if existingRecord != nil && existingRecord.ScheduleMode == "pg_cron" && existingRecord.PGCronJobID.Valid && pgCronAvailable {
+		if err := a.unschedulePGCronJob(ctx, existingRecord.PGCronJobID.Int64); err != nil {
+			return fmt.Errorf("failed to replace existing pg_cron job for %s: %w", task.Name, err)
+		}
+	}
+
+	spec := strings.TrimSpace(task.CronExpression)
+	if spec == "" {
+		spec = defaultMonthlyCronSpec
+	}
+	nextExecutionAt, err := computeNextScheduledRun(spec, time.Now())
+	if err != nil {
+		return fmt.Errorf("invalid cron expression %q for task %s: %w", spec, task.Name, err)
+	}
+	if pgCronAvailable {
+		command := fmt.Sprintf("SELECT %s()", a.quoteQualifiedFunctionCall(functionName))
+		if err := a.db.WithContext(ctx).Raw("SELECT cron.schedule(?, ?)", spec, command).Scan(&pgCronJobID).Error; err != nil {
+			return fmt.Errorf("failed to schedule pg_cron job for %s: %w", task.Name, err)
+		}
+		scheduleMode = "pg_cron"
+	}
+
+	configJSON, err := json.Marshal(task.Config)
+	if err != nil {
+		return fmt.Errorf("failed to encode task config: %w", err)
+	}
+
+	insertSQL := fmt.Sprintf(`
+		INSERT INTO %s (
+			task_name, task_type, cron_expression, description, enabled,
+			config_json, function_name, schedule_mode, pg_cron_job_id,
+			last_status, last_error, last_executed_at, next_execute_at, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+		ON CONFLICT (task_name) DO UPDATE SET
+			task_type = EXCLUDED.task_type,
+			cron_expression = EXCLUDED.cron_expression,
+			description = EXCLUDED.description,
+			enabled = EXCLUDED.enabled,
+			config_json = EXCLUDED.config_json,
+			function_name = EXCLUDED.function_name,
+			schedule_mode = EXCLUDED.schedule_mode,
+			pg_cron_job_id = EXCLUDED.pg_cron_job_id,
+			last_status = EXCLUDED.last_status,
+			last_error = EXCLUDED.last_error,
+			last_executed_at = EXCLUDED.last_executed_at,
+			next_execute_at = EXCLUDED.next_execute_at,
+			updated_at = NOW()
+	`, a.quoteIdentifier(scheduledTaskMetadataTable))
+
+	lastStatus := "registered"
+	if scheduleMode == "pg_cron" {
+		lastStatus = "scheduled"
+	}
+
+	if err := a.db.WithContext(ctx).Exec(
+		insertSQL,
+		task.Name,
+		string(task.Type),
+		spec,
+		task.Description,
+		task.Enabled,
+		string(configJSON),
+		functionName,
+		scheduleMode,
+		pgCronJobID,
+		lastStatus,
+		nil,
+		nil,
+		nextExecutionAt,
+	).Error; err != nil {
+		return fmt.Errorf("failed to persist scheduled task metadata for %s: %w", task.Name, err)
+	}
+
 	return nil
 }
 
@@ -414,24 +535,295 @@ func (a *PostgreSQLAdapter) UnregisterScheduledTask(ctx context.Context, taskNam
 		return fmt.Errorf("task name cannot be empty")
 	}
 
+	if err := a.ensureScheduledTaskMetadataTable(ctx); err != nil {
+		return err
+	}
+
+	record, err := a.getScheduledTaskRecord(ctx, taskName)
+	if err != nil {
+		return err
+	}
+
+	functionName := scheduledTaskCreateTableRoutineName(taskName)
+	if record != nil && strings.TrimSpace(record.FunctionName) != "" {
+		functionName = record.FunctionName
+	}
+
+	if record != nil && record.ScheduleMode == "pg_cron" && record.PGCronJobID.Valid {
+		if err := a.db.WithContext(ctx).Exec("SELECT cron.unschedule(?)", record.PGCronJobID.Int64).Error; err != nil {
+			return fmt.Errorf("failed to unschedule pg_cron job for %s: %w", taskName, err)
+		}
+	}
+
 	// 删除存储过程
 	dropFuncSQL := fmt.Sprintf(`
-		DROP FUNCTION IF EXISTS %s_create_table() CASCADE;
-	`, taskName)
+		DROP FUNCTION IF EXISTS %s() CASCADE;
+	`, a.quoteIdentifier(functionName))
 
 	if err := a.db.WithContext(ctx).Exec(dropFuncSQL).Error; err != nil {
-		return fmt.Errorf("failed to drop function %s_create_table: %w", taskName, err)
+		return fmt.Errorf("failed to drop function %s: %w", functionName, err)
+	}
+
+	deleteSQL := fmt.Sprintf("DELETE FROM %s WHERE task_name = ?", a.quoteIdentifier(scheduledTaskMetadataTable))
+	if err := a.db.WithContext(ctx).Exec(deleteSQL, taskName).Error; err != nil {
+		return fmt.Errorf("failed to delete scheduled task metadata for %s: %w", taskName, err)
 	}
 
 	return nil
 }
 
 // ListScheduledTasks 列出所有已注册的定时任务
-// PostgreSQL 版本返回空列表，因为存储过程的管理比较复杂
 func (a *PostgreSQLAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	// PostgreSQL 适配器目前不支持列举动态注册的任务
-	// 应用层应该维护已注册任务的列表
-	return make([]*ScheduledTaskStatus, 0), nil
+	if err := a.ensureScheduledTaskMetadataTable(ctx); err != nil {
+		return nil, err
+	}
+
+	query := fmt.Sprintf(`
+		SELECT task_name, task_type, cron_expression, description, enabled,
+			function_name, schedule_mode, pg_cron_job_id,
+			last_status, last_error, last_executed_at, next_execute_at,
+			created_at, updated_at
+		FROM %s
+		ORDER BY created_at ASC
+	`, a.quoteIdentifier(scheduledTaskMetadataTable))
+
+	rows, err := a.sqlDB.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PostgreSQL scheduled tasks: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make([]*ScheduledTaskStatus, 0)
+	for rows.Next() {
+		var record postgresScheduledTaskRecord
+		if err := rows.Scan(
+			&record.TaskName,
+			&record.TaskType,
+			&record.CronExpression,
+			&record.Description,
+			&record.Enabled,
+			&record.FunctionName,
+			&record.ScheduleMode,
+			&record.PGCronJobID,
+			&record.LastStatus,
+			&record.LastError,
+			&record.LastExecutedAt,
+			&record.NextExecuteAt,
+			&record.CreatedAt,
+			&record.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan PostgreSQL scheduled task metadata: %w", err)
+		}
+
+		info := map[string]interface{}{
+			"description":   record.Description,
+			"enabled":       record.Enabled,
+			"function_name": record.FunctionName,
+			"schedule_mode": record.ScheduleMode,
+		}
+		if strings.TrimSpace(record.CronExpression) != "" {
+			info["cron"] = record.CronExpression
+		}
+		if record.LastStatus.Valid {
+			info["last_status"] = record.LastStatus.String
+		}
+		if record.LastError.Valid {
+			info["last_error"] = record.LastError.String
+		}
+		if record.PGCronJobID.Valid {
+			info["pg_cron_job_id"] = record.PGCronJobID.Int64
+			if runtime, runtimeErr := a.getPGCronJobRuntime(ctx, record.PGCronJobID.Int64); runtimeErr == nil && runtime != nil {
+				info["pg_cron_active"] = runtime.Active
+				info["pg_cron_schedule"] = runtime.Schedule
+				info["pg_cron_command"] = runtime.Command
+			} else if runtimeErr != nil {
+				info["pg_cron_state_error"] = runtimeErr.Error()
+			}
+			if runDetail, detailErr := a.getLatestPGCronRunDetail(ctx, record.PGCronJobID.Int64); detailErr == nil && runDetail != nil {
+				if runDetail.Status.Valid {
+					info["pg_cron_last_status"] = runDetail.Status.String
+				}
+				if runDetail.ReturnMessage.Valid {
+					info["pg_cron_last_message"] = runDetail.ReturnMessage.String
+				}
+				if runDetail.FinishedAt.Valid {
+					record.LastExecutedAt = runDetail.FinishedAt
+				} else if runDetail.StartedAt.Valid {
+					record.LastExecutedAt = runDetail.StartedAt
+				}
+			} else if detailErr != nil {
+				info["pg_cron_run_error"] = detailErr.Error()
+			}
+		}
+		if record.NextExecuteAt.Valid {
+			info["next_execute_at"] = record.NextExecuteAt.Time.Unix()
+		}
+
+		status := &ScheduledTaskStatus{
+			Name:      record.TaskName,
+			Type:      ScheduledTaskType(record.TaskType),
+			Running:   false,
+			CreatedAt: record.CreatedAt.Unix(),
+			Info:      info,
+		}
+		if record.LastExecutedAt.Valid {
+			status.LastExecutedAt = record.LastExecutedAt.Time.Unix()
+		}
+		if record.NextExecuteAt.Valid {
+			status.NextExecutedAt = record.NextExecuteAt.Time.Unix()
+		}
+		if record.LastStatus.Valid && record.LastStatus.String == "running" {
+			status.Running = true
+		}
+
+		tasks = append(tasks, status)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate PostgreSQL scheduled tasks: %w", err)
+	}
+
+	return tasks, nil
+}
+
+func (a *PostgreSQLAdapter) ensureScheduledTaskMetadataTable(ctx context.Context) error {
+	createTableSQL := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			task_name TEXT PRIMARY KEY,
+			task_type TEXT NOT NULL,
+			cron_expression TEXT,
+			description TEXT,
+			enabled BOOLEAN NOT NULL DEFAULT TRUE,
+			config_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+			function_name TEXT NOT NULL,
+			schedule_mode TEXT NOT NULL DEFAULT 'function_only',
+			pg_cron_job_id BIGINT NULL,
+			last_status TEXT NULL,
+			last_error TEXT NULL,
+			last_executed_at TIMESTAMPTZ NULL,
+			next_execute_at TIMESTAMPTZ NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`, a.quoteIdentifier(scheduledTaskMetadataTable))
+
+	if err := a.db.WithContext(ctx).Exec(createTableSQL).Error; err != nil {
+		return fmt.Errorf("failed to ensure PostgreSQL scheduled task metadata table: %w", err)
+	}
+
+	alterStatements := []string{
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS last_status TEXT NULL", a.quoteIdentifier(scheduledTaskMetadataTable)),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS last_error TEXT NULL", a.quoteIdentifier(scheduledTaskMetadataTable)),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS last_executed_at TIMESTAMPTZ NULL", a.quoteIdentifier(scheduledTaskMetadataTable)),
+		fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS next_execute_at TIMESTAMPTZ NULL", a.quoteIdentifier(scheduledTaskMetadataTable)),
+	}
+	for _, stmt := range alterStatements {
+		if err := a.db.WithContext(ctx).Exec(stmt).Error; err != nil {
+			return fmt.Errorf("failed to ensure PostgreSQL scheduled task metadata columns: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (a *PostgreSQLAdapter) hasPgCronExtension(ctx context.Context) (bool, error) {
+	var count int
+	err := a.db.WithContext(ctx).Raw(
+		"SELECT COUNT(1) FROM pg_extension WHERE extname = 'pg_cron'",
+	).Scan(&count).Error
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
+func (a *PostgreSQLAdapter) getScheduledTaskRecord(ctx context.Context, taskName string) (*postgresScheduledTaskRecord, error) {
+	query := fmt.Sprintf(`
+		SELECT task_name, task_type, cron_expression, description, enabled,
+			config_json::text, function_name, schedule_mode, pg_cron_job_id,
+			last_status, last_error, last_executed_at, next_execute_at,
+			created_at, updated_at
+		FROM %s
+		WHERE task_name = ?
+	`, a.quoteIdentifier(scheduledTaskMetadataTable))
+
+	var record postgresScheduledTaskRecord
+	err := a.sqlDB.QueryRowContext(ctx, strings.Replace(query, "?", "$1", 1), taskName).Scan(
+		&record.TaskName,
+		&record.TaskType,
+		&record.CronExpression,
+		&record.Description,
+		&record.Enabled,
+		&record.ConfigJSON,
+		&record.FunctionName,
+		&record.ScheduleMode,
+		&record.PGCronJobID,
+		&record.LastStatus,
+		&record.LastError,
+		&record.LastExecutedAt,
+		&record.NextExecuteAt,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to query scheduled task metadata for %s: %w", taskName, err)
+	}
+
+	return &record, nil
+}
+
+func (a *PostgreSQLAdapter) unschedulePGCronJob(ctx context.Context, jobID int64) error {
+	return a.db.WithContext(ctx).Exec("SELECT cron.unschedule(?)", jobID).Error
+}
+
+func (a *PostgreSQLAdapter) getPGCronJobRuntime(ctx context.Context, jobID int64) (*postgresCronJobRuntime, error) {
+	row := a.sqlDB.QueryRowContext(ctx, `
+		SELECT schedule, command, active
+		FROM cron.job
+		WHERE jobid = $1
+	`, jobID)
+
+	var runtime postgresCronJobRuntime
+	if err := row.Scan(&runtime.Schedule, &runtime.Command, &runtime.Active); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &runtime, nil
+}
+
+func (a *PostgreSQLAdapter) getLatestPGCronRunDetail(ctx context.Context, jobID int64) (*postgresCronJobRunDetail, error) {
+	row := a.sqlDB.QueryRowContext(ctx, `
+		SELECT status, return_message, start_time, end_time
+		FROM cron.job_run_details
+		WHERE jobid = $1
+		ORDER BY start_time DESC
+		LIMIT 1
+	`, jobID)
+
+	var detail postgresCronJobRunDetail
+	if err := row.Scan(&detail.Status, &detail.ReturnMessage, &detail.StartedAt, &detail.FinishedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &detail, nil
+}
+
+func (a *PostgreSQLAdapter) quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func (a *PostgreSQLAdapter) quoteQualifiedFunctionCall(functionName string) string {
+	return a.quoteIdentifier("public") + "." + a.quoteIdentifier(functionName)
 }
 
 // PostgreSQLTx PostgreSQL 事务实现
@@ -528,5 +920,5 @@ func (a *PostgreSQLAdapter) GetQueryFeatures() *QueryFeatures {
 
 // init 自动注册 PostgreSQL 适配器
 func init() {
-	RegisterAdapter(&PostgreSQLFactory{})
+	MustRegisterAdapterDescriptor("postgres", newPostgresAdapterDescriptor())
 }

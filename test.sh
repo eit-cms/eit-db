@@ -91,6 +91,38 @@ start_databases() {
         sleep 10
     fi
     
+    # 检查SQL Server
+    if docker-compose ps sqlserver | grep -q "healthy\|running"; then
+        print_success "SQL Server 已就绪"
+    else
+        print_warning "SQL Server 启动缓慢，继续等待..."
+        sleep 15
+    fi
+
+    # 检查Redis
+    if docker-compose ps redis | grep -q "healthy\|running"; then
+        print_success "Redis 已就绪"
+    else
+        print_warning "Redis 启动缓慢，继续等待..."
+        sleep 5
+    fi
+
+    # 检查MongoDB
+    if docker-compose ps mongodb | grep -q "healthy\|running"; then
+        print_success "MongoDB 已就绪"
+    else
+        print_warning "MongoDB 启动缓慢，继续等待..."
+        sleep 10
+    fi
+
+    # 检查Neo4j
+    if docker-compose ps neo4j | grep -q "healthy\|running"; then
+        print_success "Neo4j 已就绪"
+    else
+        print_warning "Neo4j 启动缓慢，继续等待..."
+        sleep 20
+    fi
+
     print_success "所有数据库已启动"
 }
 
@@ -135,26 +167,12 @@ run_integration_tests() {
         go mod edit -replace github.com/eit-cms/eit-db=../
     fi
     
-    # 运行SQLite测试（无需依赖）
-    print_warning "运行SQLite集成测试..."
-    if go test -v -run SQLite 2>&1 | tee sqlite_test.log; then
-        print_success "SQLite集成测试通过"
+    print_warning "运行适配器集成测试（SQLite/PostgreSQL/MySQL/SQL Server/Redis/MongoDB/Neo4j）..."
+    if go test ./... -v 2>&1 | tee integration_test.log; then
+        print_success "适配器集成测试通过"
     else
-        print_error "SQLite集成测试失败"
+        print_error "适配器集成测试失败"
         return 1
-    fi
-    
-    # 如果设置了TEST_MODE=all，运行其他数据库测试
-    if [ "$TEST_MODE" = "all" ]; then
-        if [ ! -z "$POSTGRES_DSN" ]; then
-            print_warning "运行PostgreSQL集成测试..."
-            go test -v -run Postgres 2>&1 | tee postgres_test.log || print_warning "PostgreSQL测试跳过或失败"
-        fi
-        
-        if [ ! -z "$MYSQL_DSN" ]; then
-            print_warning "运行MySQL集成测试..."
-            go test -v -run MySQL 2>&1 | tee mysql_test.log || print_warning "MySQL测试跳过或失败"
-        fi
     fi
 }
 
@@ -251,9 +269,12 @@ EIT-DB 集成测试运行脚本
     ./test.sh stop
 
 环境变量:
-    TEST_MODE      - 设置为 "all" 运行所有数据库测试，"sqlite" 仅运行SQLite
-    POSTGRES_DSN   - PostgreSQL 连接字符串
-    MYSQL_DSN      - MySQL 连接字符串
+    POSTGRES_DSN   - PostgreSQL 连接字符串（可选）
+    MYSQL_DSN      - MySQL 连接字符串（可选）
+    SQLSERVER_DSN  - SQL Server 连接字符串（可选）
+    REDIS_URI      - Redis 连接地址（可选）
+    MONGODB_URI    - MongoDB 连接地址（可选）
+    NEO4J_URI      - Neo4j 连接地址（可选）
 
 EOF
             ;;

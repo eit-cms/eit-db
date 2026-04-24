@@ -10,31 +10,18 @@ import (
 )
 
 func setupPostgresRepo(t *testing.T) (*db.Repository, func()) {
-	config, err := db.LoadConfigFromEnvWithDefaults("postgres", &db.Config{
-		Adapter: "postgres",
-		Postgres: &db.PostgresConnectionConfig{
-			Host:     "localhost",
-			Port:     55432,
-			Username: "testuser",
-			Password: "testpass",
-			Database: "testdb",
-			SSLMode:  "disable",
-		},
-	})
-	if err != nil {
-		t.Skipf("PostgreSQL 配置无效: %v", err)
-		return nil, nil
+	config := postgresIntegrationConfig()
+	if err := config.Validate(); err != nil {
+		failIntegrationEnv(t, "PostgreSQL", err)
 	}
 
 	repo, err := db.NewRepository(config)
 	if err != nil {
-		t.Skipf("PostgreSQL 不可用: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "PostgreSQL", err)
 	}
 
 	if err := repo.Ping(context.Background()); err != nil {
-		t.Skipf("PostgreSQL 连接失败: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "PostgreSQL", err)
 	}
 
 	cleanup := func() {

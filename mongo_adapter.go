@@ -1,9 +1,9 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -24,6 +24,7 @@ type MongoAdapter struct {
 	uri                  string
 	relationJoinStrategy string
 	hideThroughArtifacts bool
+	logConfig            *MongoLogSystemConfig
 }
 
 // NewMongoAdapter 创建 MongoAdapter（不建立连接）
@@ -40,6 +41,7 @@ func NewMongoAdapter(config *Config) (*MongoAdapter, error) {
 		uri:                  resolved.URI,
 		relationJoinStrategy: resolved.RelationJoinStrategy,
 		hideThroughArtifacts: mongoHideThroughArtifactsEnabled(resolved),
+		logConfig:            resolved.LogSystem,
 	}, nil
 }
 
@@ -59,6 +61,7 @@ func (a *MongoAdapter) Connect(ctx context.Context, config *Config) error {
 		a.database = resolved.Database
 		a.relationJoinStrategy = resolved.RelationJoinStrategy
 		a.hideThroughArtifacts = mongoHideThroughArtifactsEnabled(resolved)
+		a.logConfig = resolved.LogSystem
 	}
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
@@ -123,17 +126,17 @@ func (a *MongoAdapter) GetRawConn() interface{} {
 
 // RegisterScheduledTask MongoDB 暂不支持定时任务
 func (a *MongoAdapter) RegisterScheduledTask(ctx context.Context, task *ScheduledTaskConfig) error {
-	return fmt.Errorf("mongodb: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // UnregisterScheduledTask MongoDB 暂不支持定时任务
 func (a *MongoAdapter) UnregisterScheduledTask(ctx context.Context, taskName string) error {
-	return fmt.Errorf("mongodb: scheduled task not supported")
+	return NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // ListScheduledTasks MongoDB 暂不支持定时任务
 func (a *MongoAdapter) ListScheduledTasks(ctx context.Context) ([]*ScheduledTaskStatus, error) {
-	return nil, fmt.Errorf("mongodb: scheduled task not supported")
+	return nil, NewScheduledTaskFallbackErrorWithReason("mongodb", ScheduledTaskFallbackReasonAdapterUnsupported, "native scheduled tasks not supported")
 }
 
 // GetQueryBuilderProvider 返回 MongoDB BSON Query Builder Provider。
@@ -635,6 +638,7 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			"pipeline":   pipeline,
 		}, nil
 	case "log_special_tokenization":
+		logCfg := a.resolvedLogConfig()
 		texts := extractLogTextsFromInput(input)
 		if len(texts) == 0 {
 			if text, _ := input["text"].(string); strings.TrimSpace(text) != "" {
@@ -647,12 +651,12 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 
 		rules := parseStringSlice(input["rules"])
 		if len(rules) == 0 {
-			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+			rules = logCfg.DefaultTokenizationRules
 		}
 
 		items := make([]map[string]interface{}, 0, len(texts))
 		for _, text := range texts {
-			tokens, ruleHits := tokenizeLogWithRules(text, rules)
+			tokens, ruleHits := tokenizeLogWithRulesAndPatterns(text, rules, logCfg.CustomTokenizationPatterns)
 			items = append(items, map[string]interface{}{
 				"text":      text,
 				"tokens":    tokens,
@@ -667,12 +671,13 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			"items":    items,
 		}, nil
 	case "log_hot_words":
+		logCfg := a.resolvedLogConfig()
 		texts := extractLogTextsFromInput(input)
 		if len(texts) == 0 {
 			return nil, fmt.Errorf("mongodb log_hot_words requires logs/texts/documents")
 		}
 
-		topK := 20
+		topK := logCfg.DefaultTopK
 		if v, ok := input["top_k"].(int); ok && v > 0 {
 			topK = v
 		}
@@ -680,7 +685,7 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			topK = int(v)
 		}
 
-		minLen := 2
+		minLen := logCfg.DefaultMinTokenLen
 		if v, ok := input["min_token_len"].(int); ok && v > 0 {
 			minLen = v
 		}
@@ -688,15 +693,17 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			minLen = int(v)
 		}
 
-		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		stopWords := buildStopWordsSetFromConfig(logCfg, parseStringSlice(input["stop_words"]))
 		rules := parseStringSlice(input["rules"])
 		if len(rules) == 0 {
-			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+			rules = logCfg.DefaultTokenizationRules
 		}
 
 		freq := make(map[string]int)
+		// 预置自定义热词加成
+		applyCustomHotWordBoost(freq, logCfg.CustomHotWords)
 		for _, text := range texts {
-			tokens, _ := tokenizeLogWithRules(text, rules)
+			tokens, _ := tokenizeLogWithRulesAndPatterns(text, rules, logCfg.CustomTokenizationPatterns)
 			for _, token := range tokens {
 				normalized := strings.ToLower(strings.TrimSpace(token))
 				if normalized == "" {
@@ -739,21 +746,23 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 		}
 
 		return map[string]interface{}{
-			"engine":       "mongodb",
-			"strategy":     "log_hot_words",
-			"total_logs":   len(texts),
-			"top_k":        topK,
-			"min_token_len": minLen,
-			"rules":        rules,
-			"hot_words":    hotWords,
+			"engine":              "mongodb",
+			"strategy":            "log_hot_words",
+			"total_logs":          len(texts),
+			"top_k":               topK,
+			"min_token_len":       minLen,
+			"rules":               rules,
+			"hot_words":           hotWords,
+			"hot_word_collection": logCfg.HotWordCollection,
 		}, nil
 	case "log_hot_words_by_level":
+		logCfg := a.resolvedLogConfig()
 		texts := extractLogTextsFromInput(input)
 		if len(texts) == 0 {
 			return nil, fmt.Errorf("mongodb log_hot_words_by_level requires logs/texts/documents")
 		}
 
-		topK := 20
+		topK := logCfg.DefaultTopK
 		if v, ok := input["top_k"].(int); ok && v > 0 {
 			topK = v
 		}
@@ -761,7 +770,7 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			topK = int(v)
 		}
 
-		minLen := 2
+		minLen := logCfg.DefaultMinTokenLen
 		if v, ok := input["min_token_len"].(int); ok && v > 0 {
 			minLen = v
 		}
@@ -769,15 +778,15 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			minLen = int(v)
 		}
 
-		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		stopWords := buildStopWordsSetFromConfig(logCfg, parseStringSlice(input["stop_words"]))
 		rules := parseStringSlice(input["rules"])
 		if len(rules) == 0 {
-			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+			rules = logCfg.DefaultTokenizationRules
 		}
 
 		levelField, _ := input["level_field"].(string)
 		if levelField == "" {
-			levelField = "level"
+			levelField = logCfg.DefaultLevelField
 		}
 
 		freqByLevel := make(map[string]map[string]int)
@@ -785,9 +794,11 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			level := extractLogLevel(logEntry, levelField)
 			if _, ok := freqByLevel[level]; !ok {
 				freqByLevel[level] = make(map[string]int)
+				// 预置自定义热词加成
+				applyCustomHotWordBoost(freqByLevel[level], logCfg.CustomHotWords)
 			}
 
-			tokens, _ := tokenizeLogWithRules(logEntry, rules)
+			tokens, _ := tokenizeLogWithRulesAndPatterns(logEntry, rules, logCfg.CustomTokenizationPatterns)
 			for _, token := range tokens {
 				normalized := strings.ToLower(strings.TrimSpace(token))
 				if normalized == "" {
@@ -845,12 +856,13 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			"hot_words":     resultByLevel,
 		}, nil
 	case "log_hot_words_by_time_window":
+		logCfg := a.resolvedLogConfig()
 		texts := extractLogTextsFromInput(input)
 		if len(texts) == 0 {
 			return nil, fmt.Errorf("mongodb log_hot_words_by_time_window requires logs/texts/documents")
 		}
 
-		topK := 20
+		topK := logCfg.DefaultTopK
 		if v, ok := input["top_k"].(int); ok && v > 0 {
 			topK = v
 		}
@@ -858,7 +870,7 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 			topK = int(v)
 		}
 
-		minLen := 2
+		minLen := logCfg.DefaultMinTokenLen
 		if v, ok := input["min_token_len"].(int); ok && v > 0 {
 			minLen = v
 		}
@@ -873,13 +885,13 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 
 		timestampField, _ := input["timestamp_field"].(string)
 		if timestampField == "" {
-			timestampField = "timestamp"
+			timestampField = logCfg.DefaultTimeField
 		}
 
-		stopWords := buildStopWordsSet(parseStringSlice(input["stop_words"]))
+		stopWords := buildStopWordsSetFromConfig(logCfg, parseStringSlice(input["stop_words"]))
 		rules := parseStringSlice(input["rules"])
 		if len(rules) == 0 {
-			rules = []string{"ip", "url", "error_code", "trace_id", "hashtag"}
+			rules = logCfg.DefaultTokenizationRules
 		}
 
 		freqByWindow := groupLogsByTimeWindow(texts, timestampField, timeWindow)
@@ -892,8 +904,10 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 		resultByWindow := make(map[string][]map[string]interface{})
 		for windowKey, logs := range freqByWindow {
 			freq := make(map[string]int)
+			// 预置自定义热词加成
+			applyCustomHotWordBoost(freq, logCfg.CustomHotWords)
 			for _, log := range logs {
-				tokens, _ := tokenizeLogWithRules(log, rules)
+				tokens, _ := tokenizeLogWithRulesAndPatterns(log, rules, logCfg.CustomTokenizationPatterns)
 				for _, token := range tokens {
 					normalized := strings.ToLower(strings.TrimSpace(token))
 					if normalized == "" {
@@ -934,15 +948,15 @@ func (a *MongoAdapter) ExecuteCustomFeature(ctx context.Context, feature string,
 		}
 
 		return map[string]interface{}{
-			"engine":            "mongodb",
-			"strategy":          "log_hot_words_by_time_window",
-			"total_logs":        len(texts),
-			"time_window":       timeWindow,
-			"timestamp_field":   timestampField,
-			"top_k":             topK,
-			"min_token_len":     minLen,
-			"rules":             rules,
-			"hot_words":         resultByWindow,
+			"engine":          "mongodb",
+			"strategy":        "log_hot_words_by_time_window",
+			"total_logs":      len(texts),
+			"time_window":     timeWindow,
+			"timestamp_field": timestampField,
+			"top_k":           topK,
+			"min_token_len":   minLen,
+			"rules":           rules,
+			"hot_words":       resultByWindow,
 		}, nil
 	case "article_draft_management":
 		return executeArticleDraftManagement(input)
@@ -1029,6 +1043,14 @@ func extractLogTextsFromInput(input map[string]interface{}) []string {
 	return nil
 }
 
+// resolvedLogConfig 返回非空的日志系统配置（含默认值）。
+func (a *MongoAdapter) resolvedLogConfig() *MongoLogSystemConfig {
+	if a.logConfig != nil {
+		return a.logConfig
+	}
+	return resolvedMongoLogSystemConfig(nil)
+}
+
 func buildStopWordsSet(extra []string) map[string]bool {
 	defaults := []string{"the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is", "are", "at", "from", "with", "log", "info", "warn", "error", "debug"}
 	out := make(map[string]bool, len(defaults)+len(extra))
@@ -1101,6 +1123,119 @@ func tokenizeLogWithRules(text string, rules []string) ([]string, map[string][]s
 	}
 
 	return out, ruleHits
+}
+
+// buildStopWordsSetFromConfig 使用 MongoLogSystemConfig 构建停用词集合。
+// 当 DisableBuiltinStopWords 为 true 时，仅使用 ExtraStopWords 和调用方传入的 extra。
+func buildStopWordsSetFromConfig(cfg *MongoLogSystemConfig, extra []string) map[string]bool {
+	var baseList []string
+	if cfg == nil || !cfg.DisableBuiltinStopWords {
+		baseList = []string{"the", "a", "an", "to", "for", "and", "or", "of", "in", "on", "is", "are", "at", "from", "with", "log", "info", "warn", "error", "debug"}
+	}
+	out := make(map[string]bool, len(baseList)+len(extra))
+	for _, word := range baseList {
+		out[word] = true
+	}
+	if cfg != nil {
+		for _, word := range cfg.ExtraStopWords {
+			normalized := strings.ToLower(strings.TrimSpace(word))
+			if normalized != "" {
+				out[normalized] = true
+			}
+		}
+	}
+	for _, word := range extra {
+		normalized := strings.ToLower(strings.TrimSpace(word))
+		if normalized != "" {
+			out[normalized] = true
+		}
+	}
+	return out
+}
+
+// tokenizeLogWithRulesAndPatterns 在 tokenizeLogWithRules 基础上支持自定义正则规则。
+// customPatterns 中的规则名会覆盖同名内置规则；rules 列表里的自定义规则名通过 customPatterns 解析。
+func tokenizeLogWithRulesAndPatterns(text string, rules []string, customPatterns map[string]string) ([]string, map[string][]string) {
+	base := tokenizeSearchTerms(text)
+	out := make([]string, 0, len(base)+8)
+	seen := make(map[string]struct{}, len(base)+8)
+	for _, token := range base {
+		normalized := strings.TrimSpace(token)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+
+	ruleHits := make(map[string][]string)
+	for _, rule := range rules {
+		rule = strings.ToLower(strings.TrimSpace(rule))
+		if rule == "" {
+			continue
+		}
+		var re *regexp.Regexp
+
+		// 优先使用自定义正则
+		if customPatterns != nil {
+			if pattern, ok := customPatterns[rule]; ok && strings.TrimSpace(pattern) != "" {
+				compiled, err := regexp.Compile(pattern)
+				if err == nil {
+					re = compiled
+				}
+			}
+		}
+		// 未命中自定义规则则使用内置规则
+		if re == nil {
+			switch rule {
+			case "ip":
+				re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+			case "url":
+				re = regexp.MustCompile(`https?://[^\s]+`)
+			case "error_code":
+				re = regexp.MustCompile(`\b(?:ERR|E|HTTP)[-_]?[A-Z0-9]{2,}\b`)
+			case "trace_id":
+				re = regexp.MustCompile(`\b[0-9a-fA-F]{16,32}\b`)
+			case "hashtag":
+				re = regexp.MustCompile(`#[-_\p{L}\p{N}]+`)
+			default:
+				// 既无内置规则也无自定义规则，跳过
+				continue
+			}
+		}
+
+		matches := re.FindAllString(text, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		for _, m := range matches {
+			m = strings.TrimSpace(m)
+			if m == "" {
+				continue
+			}
+			ruleHits[rule] = append(ruleHits[rule], m)
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
+
+	return out, ruleHits
+}
+
+// applyCustomHotWordBoost 将 CustomHotWords 的加成分值叠加到频率 map 上。
+func applyCustomHotWordBoost(freq map[string]int, customHotWords map[string]int) {
+	for word, boost := range customHotWords {
+		normalized := strings.ToLower(strings.TrimSpace(word))
+		if normalized != "" && boost > 0 {
+			freq[normalized] += boost
+		}
+	}
 }
 
 func extractLogLevel(logEntry string, levelField string) string {
@@ -1177,16 +1312,16 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 	if operation == "" {
 		operation = "info"
 	}
-	
+
 	// 获取文章数据
 	article, _ := input["article"].(map[string]interface{})
 	if article == nil {
 		article = make(map[string]interface{})
 	}
-	
+
 	// 获取草稿标记
 	isDraft, _ := input["is_draft"].(bool)
-	
+
 	// 获取元数据
 	tags := parseStringSlice(input["tags"])
 	category, _ := input["category"].(string)
@@ -1196,7 +1331,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 	} else if v, ok := input["priority"].(float64); ok {
 		priority = int(v)
 	}
-	
+
 	switch strings.ToLower(operation) {
 	case "create":
 		// 创建草稿文章
@@ -1208,7 +1343,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 		article["category"] = category
 		article["priority"] = priority
 		article["edit_count"] = 0
-		
+
 		return map[string]interface{}{
 			"engine":    "mongodb",
 			"strategy":  "article_draft_management",
@@ -1216,7 +1351,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 			"article":   article,
 			"status":    "draft_created",
 		}, nil
-	
+
 	case "update":
 		// 更新草稿文章
 		article["updated_at"] = time.Now()
@@ -1237,16 +1372,16 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 		if priority > 0 {
 			article["priority"] = priority
 		}
-		
+
 		return map[string]interface{}{
-			"engine":    "mongodb",
-			"strategy":  "article_draft_management",
-			"operation": "update",
-			"article":   article,
-			"status":    "draft_updated",
+			"engine":     "mongodb",
+			"strategy":   "article_draft_management",
+			"operation":  "update",
+			"article":    article,
+			"status":     "draft_updated",
 			"edit_count": editCount,
 		}, nil
-	
+
 	case "publish":
 		// 发布文章（从草稿变为已发布）
 		article["published_at"] = time.Now()
@@ -1259,7 +1394,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 		} else {
 			article["version"] = 1
 		}
-		
+
 		return map[string]interface{}{
 			"engine":    "mongodb",
 			"strategy":  "article_draft_management",
@@ -1267,19 +1402,19 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 			"article":   article,
 			"status":    "article_published",
 		}, nil
-	
+
 	case "archive", "restore":
 		// 归档或恢复文章
 		article["archived_at"] = time.Now()
 		article["is_archived"] = (operation == "archive")
 		article["updated_at"] = time.Now()
-		
+
 		status := "article_archived"
 		if operation == "restore" {
 			article["is_archived"] = false
 			status = "article_restored"
 		}
-		
+
 		return map[string]interface{}{
 			"engine":    "mongodb",
 			"strategy":  "article_draft_management",
@@ -1287,7 +1422,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 			"article":   article,
 			"status":    status,
 		}, nil
-	
+
 	case "info":
 		// 返回文章信息和状态
 		return map[string]interface{}{
@@ -1305,7 +1440,7 @@ func executeArticleDraftManagement(input map[string]interface{}) (interface{}, e
 
 	case "query_plan", "list_plan", "filter_plan":
 		return buildArticleDraftQueryPlan(input)
-	
+
 	default:
 		return nil, fmt.Errorf("mongodb article_draft_management: unsupported operation '%s'", operation)
 	}
@@ -1328,26 +1463,26 @@ func executeArticleTemplateRendering(input map[string]interface{}) (interface{},
 		}
 		templateStr = resolvedTemplate
 	}
-	
+
 	// 获取数据
 	data, _ := input["data"].(map[string]interface{})
 	if data == nil {
 		data = make(map[string]interface{})
 	}
-	
+
 	// 获取模板名称
 	templateName, _ := input["template_name"].(string)
 	if templateName == "" {
 		templateName = "article"
 	}
-	
+
 	// 获取支持功能
 	enableFunctions, _ := input["enable_functions"].(bool)
 	policy := parseArticleTemplateSecurityPolicy(input)
 	if policy.MaxTemplateSize > 0 && len([]byte(templateStr)) > policy.MaxTemplateSize {
 		return nil, fmt.Errorf("mongodb article_template_rendering: template size exceeds max_template_size=%d", policy.MaxTemplateSize)
 	}
-	
+
 	// 创建模板
 	tmpl := template.New(templateName)
 	if policy.StrictVariables {
@@ -1388,18 +1523,18 @@ func executeArticleTemplateRendering(input map[string]interface{}) (interface{},
 	if err != nil {
 		return nil, fmt.Errorf("mongodb article_template_rendering: failed to parse template: %w", err)
 	}
-	
+
 	// 渲染模板
 	var output bytes.Buffer
 	if err := parsed.Execute(&output, data); err != nil {
 		return nil, fmt.Errorf("mongodb article_template_rendering: failed to render template: %w", err)
 	}
-	
+
 	renderedContent := output.String()
-	
+
 	// 获取文章元数据（可选）
 	article, _ := input["article"].(map[string]interface{})
-	
+
 	result := map[string]interface{}{
 		"engine":          "mongodb",
 		"strategy":        "article_template_rendering",
@@ -1413,12 +1548,12 @@ func executeArticleTemplateRendering(input map[string]interface{}) (interface{},
 			"allowed_functions": policy.AllowedFunctions,
 		},
 	}
-	
+
 	if article != nil {
 		result["article_id"] = article["id"]
 		result["article_title"] = article["title"]
 	}
-	
+
 	return result, nil
 }
 
@@ -1482,17 +1617,17 @@ func executeArticleTemplatePresetLibrary(input map[string]interface{}) (interfac
 	}
 
 	return map[string]interface{}{
-		"engine":        "mongodb",
-		"strategy":      "article_template_preset_library",
-		"operation":     "get",
+		"engine":          "mongodb",
+		"strategy":        "article_template_preset_library",
+		"operation":       "get",
 		"template_preset": preset,
-		"template":      resolved,
+		"template":        resolved,
 	}, nil
 }
 
 type articleTemplateSecurityPolicy struct {
-	MaxTemplateSize int
-	StrictVariables bool
+	MaxTemplateSize  int
+	StrictVariables  bool
 	AllowedFunctions []string
 }
 
@@ -1618,12 +1753,12 @@ func buildArticleDraftQueryPlan(input map[string]interface{}) (interface{}, erro
 	}
 
 	projection := map[string]interface{}{
-		"title":       1,
-		"author_id":   1,
-		"category":    1,
-		"is_draft":    1,
-		"is_archived": 1,
-		"updated_at":  1,
+		"title":        1,
+		"author_id":    1,
+		"category":     1,
+		"is_draft":     1,
+		"is_archived":  1,
+		"updated_at":   1,
 		"published_at": 1,
 	}
 	if fields := parseStringSlice(input["fields"]); len(fields) > 0 {
@@ -1685,5 +1820,5 @@ func (f *MongoFactory) Create(config *Config) (Adapter, error) {
 }
 
 func init() {
-	RegisterAdapter(&MongoFactory{})
+	MustRegisterAdapterDescriptor("mongodb", newMongoAdapterDescriptor())
 }
