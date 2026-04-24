@@ -18,6 +18,10 @@ func setupMySQLRepo(t *testing.T) (*db.Repository, func()) {
 		failIntegrationEnv(t, "MySQL", err)
 	}
 
+	if err := repo.Connect(context.Background()); err != nil {
+		failIntegrationEnv(t, "MySQL", err)
+	}
+
 	if err := repo.Ping(context.Background()); err != nil {
 		failIntegrationEnv(t, "MySQL", err)
 	}

@@ -20,6 +20,10 @@ func setupNeo4jRepo(t *testing.T) (*db.Repository, func()) {
 		failIntegrationEnv(t, "Neo4j", err)
 	}
 
+	if err := repo.Connect(context.Background()); err != nil {
+		failIntegrationEnv(t, "Neo4j", err)
+	}
+
 	if err := repo.Ping(context.Background()); err != nil {
 		failIntegrationEnv(t, "Neo4j", err)
 	}

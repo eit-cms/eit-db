@@ -23,6 +23,10 @@ func setupSQLServerRepo(t *testing.T) (*db.Repository, func()) {
 		failIntegrationEnv(t, "SQL Server", err)
 	}
 
+	if err := repo.Connect(context.Background()); err != nil {
+		failIntegrationEnv(t, "SQL Server", err)
+	}
+
 	if err := repo.Ping(context.Background()); err != nil {
 		failIntegrationEnv(t, "SQL Server", err)
 	}
