@@ -1,0 +1,66 @@
+name: integration-compose
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  adapter-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Show Docker version
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Start official integration environment
+        run: docker compose up -d
+
+      - name: Wait for container health checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          services=(postgres mysql sqlserver redis mongodb neo4j)
+          for svc in "${services[@]}"; do
+            echo "Waiting for ${svc}..."
+            timeout 300 bash -c "
+              until [ \"\$(docker compose ps -q ${svc})\" != \"\" ] && \
+                    [ \"\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \$(docker compose ps -q ${svc}))\" = \"healthy\" ] || \
+                    [ \"\$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \$(docker compose ps -q ${svc}))\" = \"running\" ]; do
+                sleep 3
+              done
+            "
+            status=$(docker inspect --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$(docker compose ps -q ${svc})")
+            echo "${svc} status: ${status}"
+          done
+
+      - name: Run adapter integration tests
+        run: |
+          cd adapter-application-tests
+          go test ./... -v -count=1
+
+      - name: Print docker compose status on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=200
+
+      - name: Stop containers
+        if: always()
+        run: docker compose down -v
