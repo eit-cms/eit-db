@@ -12,19 +12,16 @@ import (
 func setupRedisRepo(t *testing.T) (*db.Repository, func()) {
 	config := redisIntegrationConfig()
 	if err := config.Validate(); err != nil {
-		t.Skipf("Redis 配置无效: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Redis", err)
 	}
 
 	repo, err := db.NewRepository(config)
 	if err != nil {
-		t.Skipf("Redis 不可用: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Redis", err)
 	}
 
 	if err := repo.Ping(context.Background()); err != nil {
-		t.Skipf("Redis 连接失败: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Redis", err)
 	}
 
 	cleanup := func() {
@@ -36,9 +33,6 @@ func setupRedisRepo(t *testing.T) (*db.Repository, func()) {
 
 func TestRedisIntegrationSetGetDelete(t *testing.T) {
 	repo, cleanup := setupRedisRepo(t)
-	if repo == nil {
-		return
-	}
 	defer cleanup()
 
 	adapter, ok := repo.GetAdapter().(*db.RedisAdapter)

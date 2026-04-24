@@ -14,19 +14,16 @@ import (
 func setupMongoRepo(t *testing.T) (*db.Repository, *db.Config, func()) {
 	config := mongoIntegrationConfig()
 	if err := config.Validate(); err != nil {
-		t.Skipf("MongoDB 配置无效: %v", err)
-		return nil, nil, nil
+		failIntegrationEnv(t, "MongoDB", err)
 	}
 
 	repo, err := db.NewRepository(config)
 	if err != nil {
-		t.Skipf("MongoDB 不可用: %v", err)
-		return nil, nil, nil
+		failIntegrationEnv(t, "MongoDB", err)
 	}
 
 	if err := repo.Ping(context.Background()); err != nil {
-		t.Skipf("MongoDB 连接失败: %v", err)
-		return nil, nil, nil
+		failIntegrationEnv(t, "MongoDB", err)
 	}
 
 	cleanup := func() {
@@ -38,9 +35,6 @@ func setupMongoRepo(t *testing.T) (*db.Repository, *db.Config, func()) {
 
 func TestMongoIntegrationInsertFindDelete(t *testing.T) {
 	repo, config, cleanup := setupMongoRepo(t)
-	if repo == nil {
-		return
-	}
 	defer cleanup()
 
 	adapter, ok := repo.GetAdapter().(*db.MongoAdapter)

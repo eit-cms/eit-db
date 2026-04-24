@@ -1724,13 +1724,13 @@ go test ./... -v
 
 ### 集成测试
 
-测试所有适配器（SQLite 无需依赖；PostgreSQL/MySQL/SQL Server/Redis/MongoDB/Neo4j 需对应实例）：
+测试所有适配器（SQLite 无需依赖；其余后端必须先启动项目官方 Docker 环境）：
 
 ```bash
-# 仅 SQLite 测试（推荐开发期间使用）
+# 仅 SQLite 测试（推荐快速开发场景）
 go test ./adapter-application-tests -v
 
-# 或使用测试脚本
+# 全量集成测试（要求官方 compose 环境已启动；后端不可用会直接失败）
 ./test.sh integration
 
 # 完整测试（启动所有数据库 + 运行测试）
@@ -1740,7 +1740,7 @@ go test ./adapter-application-tests -v
 ### 使用 Docker 运行完整测试
 
 ```bash
-# 启动 PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j 容器
+# 启动项目官方测试镜像（PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j）
 ./test.sh start
 
 # 运行所有测试

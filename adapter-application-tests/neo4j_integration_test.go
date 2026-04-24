@@ -12,19 +12,16 @@ import (
 func setupNeo4jRepo(t *testing.T) (*db.Repository, func()) {
 	config := neo4jIntegrationConfig()
 	if err := config.Validate(); err != nil {
-		t.Skipf("Neo4j 配置无效: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Neo4j", err)
 	}
 
 	repo, err := db.NewRepository(config)
 	if err != nil {
-		t.Skipf("Neo4j 不可用: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Neo4j", err)
 	}
 
 	if err := repo.Ping(context.Background()); err != nil {
-		t.Skipf("Neo4j 连接失败: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "Neo4j", err)
 	}
 
 	cleanup := func() {
@@ -36,9 +33,6 @@ func setupNeo4jRepo(t *testing.T) (*db.Repository, func()) {
 
 func TestNeo4jIntegrationWriteReadDelete(t *testing.T) {
 	repo, cleanup := setupNeo4jRepo(t)
-	if repo == nil {
-		return
-	}
 	defer cleanup()
 
 	adapter, ok := repo.GetAdapter().(*db.Neo4jAdapter)
