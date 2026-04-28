@@ -11,7 +11,7 @@ type ConfigOption func(*Config)
 
 // NewConfig 通过函数式选项创建并验证 Config。
 //
-// adapter 可选值: "postgres" | "mysql" | "sqlserver" | "sqlite" | "mongodb" | "neo4j" | "redis"
+// adapter 可选值: "postgres" | "mysql" | "sqlserver" | "sqlite" | "mongodb" | "neo4j" | "redis" | "arango"
 //
 // 每个选项直接写入对应适配器的专属子配置（如 cfg.Postgres.Host），无需关心
 // 平铺字段或 Options map。Validate() 在内部调用，返回 error 时配置无效。
@@ -146,6 +146,11 @@ func WithDatabase(database string) ConfigOption {
 				cfg.Neo4j = &Neo4jConnectionConfig{}
 			}
 			cfg.Neo4j.Database = database
+		case "arango":
+			if cfg.Arango == nil {
+				cfg.Arango = &ArangoConnectionConfig{}
+			}
+			cfg.Arango.Database = database
 		default:
 			cfg.Database = database
 		}
@@ -181,6 +186,11 @@ func WithUsername(username string) ConfigOption {
 				cfg.Redis = &RedisConnectionConfig{}
 			}
 			cfg.Redis.Username = username
+		case "arango":
+			if cfg.Arango == nil {
+				cfg.Arango = &ArangoConnectionConfig{}
+			}
+			cfg.Arango.Username = username
 		default:
 			cfg.Username = username
 		}
@@ -216,6 +226,11 @@ func WithPassword(password string) ConfigOption {
 				cfg.Redis = &RedisConnectionConfig{}
 			}
 			cfg.Redis.Password = password
+		case "arango":
+			if cfg.Arango == nil {
+				cfg.Arango = &ArangoConnectionConfig{}
+			}
+			cfg.Arango.Password = password
 		default:
 			cfg.Password = password
 		}
@@ -276,6 +291,11 @@ func WithURI(uri string) ConfigOption {
 				cfg.Redis = &RedisConnectionConfig{}
 			}
 			cfg.Redis.URI = uri
+		case "arango":
+			if cfg.Arango == nil {
+				cfg.Arango = &ArangoConnectionConfig{}
+			}
+			cfg.Arango.URI = uri
 		}
 	}
 }

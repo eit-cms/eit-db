@@ -15,6 +15,8 @@ type mockStartupCapabilityAdapter struct {
 	jsonRuntimeErr error
 	fullText       *FullTextRuntimeCapability
 	fullTextErr    error
+	arangoRuntime  *ArangoRuntimeCapability
+	arangoErr      error
 }
 
 type metadataStartupCapabilityAdapter struct {
@@ -66,6 +68,20 @@ func (m *mockStartupCapabilityAdapter) InspectFullTextRuntime(ctx context.Contex
 		return nil, m.fullTextErr
 	}
 	return m.fullText, nil
+}
+func (m *mockStartupCapabilityAdapter) InspectArangoRuntime(ctx context.Context) (*ArangoRuntimeCapability, error) {
+	if m.arangoErr != nil {
+		return nil, m.arangoErr
+	}
+	return m.arangoRuntime, nil
+}
+
+type metadataArangoStartupCapabilityAdapter struct {
+	mockStartupCapabilityAdapter
+}
+
+func (m *metadataArangoStartupCapabilityAdapter) Metadata() AdapterMetadata {
+	return AdapterMetadata{Name: "arango", DriverKind: "document", Vendor: "arangodb"}
 }
 
 func TestRunStartupCapabilityCheckLenient(t *testing.T) {
@@ -166,6 +182,20 @@ func TestStartupCapabilityConfigValidationInvalidCapabilityMode(t *testing.T) {
 	}
 }
 
+func TestStartupCapabilityConfigValidationSupportsArangoRuntime(t *testing.T) {
+	cfg := &Config{
+		Adapter:  "sqlite",
+		Database: ":memory:",
+		StartupCapabilities: &StartupCapabilityConfig{
+			Mode:    "lenient",
+			Inspect: []string{StartupCapabilityArangoRuntime},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected arango_runtime to be valid startup capability, got: %v", err)
+	}
+}
+
 func TestRunStartupCapabilityCheckPerCapabilityStrictInLenientModeFails(t *testing.T) {
 	repo := &Repository{adapter: &mockStartupCapabilityAdapter{}}
 	_, err := repo.RunStartupCapabilityCheck(context.Background(), &StartupCapabilityConfig{
@@ -222,6 +252,46 @@ func TestRunStartupCapabilityCheckPerCapabilityMixedPolicy(t *testing.T) {
 				t.Fatalf("expected full_text_runtime degraded in lenient mode, got %s", check.Status)
 			}
 		}
+	}
+}
+
+func TestRunStartupCapabilityCheckArangoRuntimeStrictPasses(t *testing.T) {
+	repo := &Repository{adapter: &mockStartupCapabilityAdapter{
+		arangoRuntime: &ArangoRuntimeCapability{NativeSupported: true, Version: "3.12.0", Notes: "ok"},
+	}}
+
+	report, err := repo.RunStartupCapabilityCheck(context.Background(), &StartupCapabilityConfig{
+		Mode:     "strict",
+		Inspect:  []string{StartupCapabilityArangoRuntime},
+		Required: []string{StartupCapabilityArangoRuntime},
+	})
+	if err != nil {
+		t.Fatalf("expected arango runtime strict check to pass, got: %v", err)
+	}
+	if report == nil || len(report.Checks) != 1 {
+		t.Fatalf("expected one check, got %+v", report)
+	}
+	if report.Checks[0].Status != "ok" {
+		t.Fatalf("expected arango_runtime status ok, got %s", report.Checks[0].Status)
+	}
+}
+
+func TestRunStartupCapabilityCheckDefaultInspectForArango(t *testing.T) {
+	repo := &Repository{adapter: &metadataArangoStartupCapabilityAdapter{
+		mockStartupCapabilityAdapter: mockStartupCapabilityAdapter{
+			arangoRuntime: &ArangoRuntimeCapability{NativeSupported: true, Version: "3.12.0"},
+		},
+	}}
+
+	report, err := repo.RunStartupCapabilityCheck(context.Background(), &StartupCapabilityConfig{Mode: "lenient"})
+	if err != nil {
+		t.Fatalf("expected lenient default arango inspect to pass, got: %v", err)
+	}
+	if report == nil || len(report.Checks) != 1 {
+		t.Fatalf("expected one default check for arango, got %+v", report)
+	}
+	if report.Checks[0].Name != StartupCapabilityArangoRuntime {
+		t.Fatalf("expected default arango inspect item %s, got %s", StartupCapabilityArangoRuntime, report.Checks[0].Name)
 	}
 }
 

@@ -90,7 +90,7 @@ type Tx interface {
 
 // Config 数据库配置结构 (参考 Ecto 的 Repo 配置)
 type Config struct {
-	// 适配器类型: "sqlite" | "postgres" | "mysql" | "sqlserver" | "mongodb" | "neo4j"
+	// 适配器类型: "sqlite" | "postgres" | "mysql" | "sqlserver" | "mongodb" | "neo4j" | "redis" | "arango"
 	Adapter string `json:"adapter" yaml:"adapter"`
 
 	// EnableScheduledTaskFallback 控制定时任务在适配器不支持时是否自动回退到应用层调度器。
@@ -109,6 +109,7 @@ type Config struct {
 	MongoDB   *MongoConnectionConfig     `json:"mongodb,omitempty" yaml:"mongodb,omitempty"`
 	Neo4j     *Neo4jConnectionConfig     `json:"neo4j,omitempty" yaml:"neo4j,omitempty"`
 	Redis     *RedisConnectionConfig     `json:"redis,omitempty" yaml:"redis,omitempty"`
+	Arango    *ArangoConnectionConfig    `json:"arango,omitempty" yaml:"arango,omitempty"`
 
 	// 旧的平铺字段仍保留为内部 fallback，便于仓库内逐步迁移。
 	// 新代码应优先写入上面的 adapter 专属子配置。
@@ -245,6 +246,25 @@ type RedisConnectionConfig struct {
 	WriteTimeout int `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
 }
 
+// ArangoConnectionConfig ArangoDB 连接配置。
+type ArangoConnectionConfig struct {
+	// URI 示例: http://localhost:8529
+	URI string `json:"uri,omitempty" yaml:"uri,omitempty"`
+
+	// 逻辑数据库名，默认 _system。
+	Database string `json:"database,omitempty" yaml:"database,omitempty"`
+
+	// 认证信息。
+	Username string `json:"username,omitempty" yaml:"username,omitempty"`
+	Password string `json:"password,omitempty" yaml:"password,omitempty"`
+
+	// 协作层命名空间（用于逻辑隔离标签）。
+	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+
+	// HTTP 请求超时（秒），0 使用默认值 10。
+	TimeoutSeconds int `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+}
+
 // Neo4jConnectionConfig Neo4j 连接配置。
 type Neo4jConnectionConfig struct {
 	URI           string                    `json:"uri,omitempty" yaml:"uri,omitempty"`
@@ -325,6 +345,7 @@ type Repository struct {
 	adapterType             string
 	startupCapabilityReport *StartupCapabilityReport
 	compiledQueryCache      *CompiledQueryCache
+	blueprintRegistry       *BlueprintRegistry
 	resultCacheBackend      CacheBackend
 	scheduledTaskFallbackOn bool
 	fallbackTaskManager     *inProcessScheduledTaskManager
@@ -962,6 +983,23 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 		return nil, fmt.Errorf("query statement cannot be empty")
 	}
 
+	return r.ExecuteAuto(ctx, query, args...)
+}
+
+// ExecuteAuto 执行统一语句入口，自动映射目标适配器语言并路由读/写。
+//
+// 设计目标：
+// 1. 应用层只依赖一套执行 API，不再为 SQL/AQL/Cypher 维护不同入口。
+// 2. 非 SQL 适配器通过 descriptor hook 或内置路由接管执行。
+// 3. 保持 ExecuteQueryConstructorAuto 的向后兼容。
+func (r *Repository) ExecuteAuto(ctx context.Context, statement string, args ...interface{}) (*QueryConstructorAutoExecutionResult, error) {
+	query := strings.TrimSpace(statement)
+	if query == "" {
+		return nil, fmt.Errorf("query statement cannot be empty")
+	}
+
+	copyArgs := copyQueryArgs(args)
+
 	r.mu.RLock()
 	adapter := r.adapter
 	r.mu.RUnlock()
@@ -969,26 +1007,26 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 		return nil, fmt.Errorf("adapter is not initialized")
 	}
 	if descriptor, ok := r.resolveExecutionDescriptor(adapter); ok && descriptor.ExecuteQueryConstructorAuto != nil {
-		if routed, handled, hookErr := descriptor.ExecuteQueryConstructorAuto(ctx, adapter, query, args); handled {
+		if routed, handled, hookErr := descriptor.ExecuteQueryConstructorAuto(ctx, adapter, query, copyArgs); handled {
 			return routed, hookErr
 		}
 	}
 
 	if neo, ok := adapter.(*Neo4jAdapter); ok {
 		if looksLikeReadCypher(query) {
-			rows, queryErr := neo.QueryCypher(ctx, query, buildCypherParamsFromArgs(args))
+			rows, queryErr := neo.QueryCypher(ctx, query, buildCypherParamsFromArgs(copyArgs))
 			if queryErr != nil {
 				return nil, queryErr
 			}
 			return &QueryConstructorAutoExecutionResult{
 				Mode:      "query",
 				Statement: query,
-				Args:      copyQueryArgs(args),
+				Args:      copyArgs,
 				Rows:      rows,
 			}, nil
 		}
 
-		summary, execErr := neo.ExecCypher(ctx, query, buildCypherParamsFromArgs(args))
+		summary, execErr := neo.ExecCypher(ctx, query, buildCypherParamsFromArgs(copyArgs))
 		if execErr != nil {
 			return nil, execErr
 		}
@@ -996,7 +1034,7 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 		return &QueryConstructorAutoExecutionResult{
 			Mode:      "exec",
 			Statement: query,
-			Args:      copyQueryArgs(args),
+			Args:      copyArgs,
 			Exec: &QueryConstructorExecSummary{
 				RowsAffected: rowsAffected,
 				LastInsertID: nil,
@@ -1023,7 +1061,7 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 			return &QueryConstructorAutoExecutionResult{
 				Mode:      "query",
 				Statement: query,
-				Args:      copyQueryArgs(args),
+				Args:      copyArgs,
 				Rows:      rows,
 			}, nil
 		}
@@ -1035,7 +1073,7 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 			return &QueryConstructorAutoExecutionResult{
 				Mode:      "exec",
 				Statement: query,
-				Args:      copyQueryArgs(args),
+				Args:      copyArgs,
 				Exec:      summary,
 			}, nil
 		}
@@ -1050,9 +1088,9 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 				return nil, redisErr
 			}
 			if rows != nil {
-				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyArgs, Rows: rows}, nil
 			}
-			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyQueryArgs(args), Exec: execSummary}, nil
+			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyArgs, Exec: execSummary}, nil
 		}
 		if strings.HasPrefix(trimmed, redisCompiledPipelinePrefix) {
 			rows, execSummary, redisErr := redisAdapter.ExecuteCompiledPipelinePlan(ctx, query)
@@ -1060,15 +1098,15 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 				return nil, redisErr
 			}
 			if rows != nil {
-				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyQueryArgs(args), Rows: rows}, nil
+				return &QueryConstructorAutoExecutionResult{Mode: "query", Statement: query, Args: copyArgs, Rows: rows}, nil
 			}
-			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyQueryArgs(args), Exec: execSummary}, nil
+			return &QueryConstructorAutoExecutionResult{Mode: "exec", Statement: query, Args: copyArgs, Exec: execSummary}, nil
 		}
 		return nil, fmt.Errorf("redis query constructor requires compiled plan prefix %q or %q", redisCompiledCommandPrefix, redisCompiledPipelinePrefix)
 	}
 
 	if looksLikeReadSQL(query) {
-		sqlRows, queryErr := r.Query(ctx, query, args...)
+		sqlRows, queryErr := r.Query(ctx, query, copyArgs...)
 		if queryErr != nil {
 			return nil, queryErr
 		}
@@ -1081,12 +1119,12 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 		return &QueryConstructorAutoExecutionResult{
 			Mode:      "query",
 			Statement: query,
-			Args:      copyQueryArgs(args),
+			Args:      copyArgs,
 			Rows:      rows,
 		}, nil
 	}
 
-	res, execErr := r.Exec(ctx, query, args...)
+	res, execErr := r.Exec(ctx, query, copyArgs...)
 	if execErr != nil {
 		return nil, execErr
 	}
@@ -1104,7 +1142,7 @@ func (r *Repository) ExecuteQueryConstructorAuto(ctx context.Context, constructo
 	return &QueryConstructorAutoExecutionResult{
 		Mode:      "exec",
 		Statement: query,
-		Args:      copyQueryArgs(args),
+		Args:      copyArgs,
 		Exec: &QueryConstructorExecSummary{
 			RowsAffected: rowsAffected,
 			LastInsertID: lastInsertID,
@@ -1242,6 +1280,28 @@ func looksLikeReadCypher(query string) bool {
 		return strings.Contains(normalized, "RETURN")
 	}
 	return false
+}
+
+func looksLikeReadAQL(query string) bool {
+	normalized := strings.ToUpper(strings.Join(strings.Fields(strings.TrimSpace(query)), " "))
+	if normalized == "" {
+		return false
+	}
+
+	if strings.HasPrefix(normalized, "INSERT ") || strings.HasPrefix(normalized, "UPDATE ") || strings.HasPrefix(normalized, "REPLACE ") || strings.HasPrefix(normalized, "REMOVE ") || strings.HasPrefix(normalized, "UPSERT ") {
+		return false
+	}
+
+	padded := " " + normalized + " "
+	if strings.Contains(padded, " INSERT ") || strings.Contains(padded, " UPDATE ") || strings.Contains(padded, " REPLACE ") || strings.Contains(padded, " REMOVE ") || strings.Contains(padded, " UPSERT ") {
+		return false
+	}
+
+	if strings.HasPrefix(normalized, "FOR ") || strings.HasPrefix(normalized, "LET ") || strings.HasPrefix(normalized, "RETURN ") || strings.HasPrefix(normalized, "WITH ") || strings.HasPrefix(normalized, "COLLECT ") {
+		return true
+	}
+
+	return strings.Contains(padded, " RETURN ")
 }
 
 func scanRowsToMapSlice(rows *sql.Rows) ([]map[string]interface{}, error) {

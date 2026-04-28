@@ -69,7 +69,7 @@ SQLite JSON 降级说明：
 
 说明：版本门槛来自 DatabaseFeatures.FeatureSupport；查询层的特性门槛来自 QueryFeatures.FeatureSupport。
 
-## 3. 查询能力矩阵（QueryFeatures）
+## 3. 查询能力矩阵（QueryFeatures，补充维度）
 
 | 查询能力 | PostgreSQL | MySQL | SQLite | SQL Server | MongoDB |
 |---|---|---|---|---|---|
@@ -81,9 +81,27 @@ SQLite JSON 降级说明：
 | 正则匹配 | ✅ | ✅ | ❌(application_layer) | ❌(application_layer) | ✅ |
 | LIMIT | ✅ | ✅ | ✅ | ❌(alternative_syntax: OFFSET/FETCH) | ✅ |
 
-说明：括号中的内容表示 QueryFallbackStrategy。
+说明：
 
-## 3.1 关系语义支持矩阵（JoinSemantic / Relation Registry）
+1. 括号中的内容表示 QueryFallbackStrategy。
+2. 该矩阵用于说明方言能力差异，不再作为“关系语义强弱”的主判断依据。
+
+## 3.1 关系语义支持方式与程度（主口径）
+
+面向后端无关化 API（统一 `Query/Exec` 自动映射）场景，关系能力按“语义表达方式”分级，而非仅按 SQL JOIN 语法覆盖率分级。
+
+| 后端 | 关系语义方式 | 支持程度 | 说明 |
+|---|---|---|---|
+| Neo4j | 图关系边 + 路径遍历 | 强支持 | 图关系为 first-class 语义 |
+| ArangoDB | AQL 图/文档关系语义 | 强支持 | 图关系与文档关联为 first-class |
+| PostgreSQL | 外键 + JOIN（关系型） | 中支持 | 关系表达稳定，但以关系型范式为主 |
+| MySQL | 外键 + JOIN（关系型） | 中支持 | 关系表达稳定，但以关系型范式为主 |
+| SQLite | 外键 + JOIN（关系型） | 中支持 | 关系表达可用，复杂语义依赖应用层补偿 |
+| SQL Server | 外键 + JOIN / 递归 CTE | 中支持 | 关系表达可策略化，但仍属关系型范式 |
+| MongoDB | `$lookup` / pipeline / 应用层预加载 | 弱支持 | 关系语义可模拟，但非一等关系模型 |
+| Redis | 键值与流式模型 | 不适用 | 不承担关系语义主执行面 |
+
+## 3.2 关系语义支持矩阵（JoinSemantic / Relation Registry）
 
 该矩阵与说明统一维护在 [docs/RELATION_SEMANTICS.md](docs/RELATION_SEMANTICS.md)。
 

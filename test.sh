@@ -82,6 +82,22 @@ start_databases() {
         print_warning "PostgreSQL 启动缓慢，继续等待..."
         sleep 10
     fi
+
+    # 检查Redis
+    if docker-compose ps redis | grep -q "healthy\|running"; then
+        print_success "Redis 已就绪"
+    else
+        print_warning "Redis 启动缓慢，继续等待..."
+        sleep 5
+    fi
+
+    # 检查ArangoDB
+    if docker-compose ps arango | grep -q "healthy\|running"; then
+        print_success "ArangoDB 已就绪"
+    else
+        print_warning "ArangoDB 启动缓慢，继续等待..."
+        sleep 10
+    fi
     
     # 检查MySQL
     if docker-compose ps mysql | grep -q "healthy\|running"; then
@@ -141,6 +157,24 @@ run_integration_tests() {
         print_success "SQLite集成测试通过"
     else
         print_error "SQLite集成测试失败"
+        return 1
+    fi
+
+    # 运行Redis + PostgreSQL 协作链路测试
+    print_warning "运行Redis + PostgreSQL 协作集成测试..."
+    if go test -v -run 'TestRedisIntegrationPublishSubscribeRoundTrip|TestRedisPostgresCollaborationStreamRoundTrip' 2>&1 | tee redis_collab_test.log; then
+        print_success "Redis + PostgreSQL 协作集成测试通过"
+    else
+        print_error "Redis + PostgreSQL 协作集成测试失败"
+        return 1
+    fi
+
+    # 运行Redis + PostgreSQL + Arango 账本端到端测试
+    print_warning "运行Redis + PostgreSQL + Arango 账本集成测试..."
+    if go test -v -run 'TestRedisPostgresConsumeAndArangoLedgerEndToEnd|TestDualRedisAdaptersSameBackendRoundTripIsolation|TestDualArangoAdaptersSameBackendNamespaceIsolation|TestDualRedisAdaptersSameBackendPendingClaimRetryIsolation|TestDualRedisAdaptersSameBackendDeadLetterIsolation|TestRedisArangoUnifiedManagementPath|TestManagedAndExplicitAdaptersBehaviorParityInSameScenario|TestManagedAndExplicitAdaptersTTLAutoCleanupParity' 2>&1 | tee arango_collab_test.log; then
+        print_success "Redis + PostgreSQL + Arango 账本集成测试通过"
+    else
+        print_error "Redis + PostgreSQL + Arango 账本集成测试失败"
         return 1
     fi
     
@@ -254,6 +288,7 @@ EIT-DB 集成测试运行脚本
     TEST_MODE      - 设置为 "all" 运行所有数据库测试，"sqlite" 仅运行SQLite
     POSTGRES_DSN   - PostgreSQL 连接字符串
     MYSQL_DSN      - MySQL 连接字符串
+    ARANGO_URI     - ArangoDB 连接地址（默认 http://localhost:58529）
 
 EOF
             ;;

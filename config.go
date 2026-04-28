@@ -331,6 +331,46 @@ func (c *Config) ResolvedRedisConfig() *RedisConnectionConfig {
 	return resolved
 }
 
+// ResolvedArangoConfig 返回 ArangoDB 的有效配置。
+func (c *Config) ResolvedArangoConfig() *ArangoConnectionConfig {
+	resolved := &ArangoConnectionConfig{}
+	if c != nil && c.Arango != nil {
+		*resolved = *c.Arango
+	}
+	if resolved.URI == "" {
+		if uri, _ := c.Options["uri"].(string); strings.TrimSpace(uri) != "" {
+			resolved.URI = strings.TrimSpace(uri)
+		}
+	}
+	if resolved.Database == "" {
+		resolved.Database = c.Database
+	}
+	if resolved.Username == "" {
+		resolved.Username = c.Username
+	}
+	if resolved.Password == "" {
+		resolved.Password = c.Password
+	}
+	if resolved.Namespace == "" {
+		if ns, _ := c.Options["namespace"].(string); strings.TrimSpace(ns) != "" {
+			resolved.Namespace = strings.TrimSpace(ns)
+		}
+	}
+	if resolved.URI == "" {
+		resolved.URI = "http://localhost:8529"
+	}
+	if resolved.Database == "" {
+		resolved.Database = "_system"
+	}
+	if resolved.Username == "" {
+		resolved.Username = "root"
+	}
+	if resolved.TimeoutSeconds <= 0 {
+		resolved.TimeoutSeconds = 10
+	}
+	return resolved
+}
+
 // resolvedNeo4jSocialNetworkConfig 返回补全默认值后的社交网络配置。
 func resolvedNeo4jSocialNetworkConfig(src *Neo4jSocialNetworkConfig) *Neo4jSocialNetworkConfig {
 	cfg := &Neo4jSocialNetworkConfig{}
@@ -639,6 +679,16 @@ func LoadConfigFromEnvWithDefaults(adapter string, defaults *Config) (*Config, e
 		}
 		config.Redis = resolved
 
+	case "arango":
+		resolved := config.ResolvedArangoConfig()
+		resolved.URI = preferEnvString(firstNonEmptyEnv("ARANGO_URI", "ARANGODB_URI"), resolved.URI, "http://localhost:8529")
+		resolved.Database = preferEnvString(firstNonEmptyEnv("ARANGO_DB", "ARANGO_DATABASE", "ARANGODB_DATABASE"), resolved.Database, "_system")
+		resolved.Username = preferEnvString(firstNonEmptyEnv("ARANGO_USER", "ARANGO_USERNAME", "ARANGODB_USER", "ARANGODB_USERNAME"), resolved.Username, "root")
+		resolved.Password = preferEnvString(firstNonEmptyEnv("ARANGO_PASSWORD", "ARANGODB_PASSWORD"), resolved.Password, "")
+		resolved.Namespace = preferEnvString(firstNonEmptyEnv("ARANGO_NAMESPACE", "ARANGODB_NAMESPACE"), resolved.Namespace, "")
+		resolved.TimeoutSeconds = preferEnvInt(firstNonEmptyEnv("ARANGO_TIMEOUT_SECONDS", "ARANGODB_TIMEOUT_SECONDS"), resolved.TimeoutSeconds, 10)
+		config.Arango = resolved
+
 	default:
 		return nil, fmt.Errorf("unsupported adapter: %s", normalized)
 	}
@@ -723,6 +773,10 @@ func cloneConfig(src *Config) *Config {
 			redisCfg.ClusterAddrs = append([]string(nil), src.Redis.ClusterAddrs...)
 		}
 		clone.Redis = &redisCfg
+	}
+	if src.Arango != nil {
+		arangoCfg := *src.Arango
+		clone.Arango = &arangoCfg
 	}
 	return &clone
 }

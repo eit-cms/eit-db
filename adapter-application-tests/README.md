@@ -13,6 +13,8 @@
 - `sqlite_integration_test.go` - SQLite适配器集成测试（无依赖，可直接运行）
 - `postgres_integration_test.go` - PostgreSQL适配器集成测试（需要PostgreSQL实例）
 - `mysql_integration_test.go` - MySQL适配器集成测试（需要MySQL实例）
+- `collaboration_integration_test.go` - Redis消息交互与 Redis + PostgreSQL 协作链路测试（需要Redis与PostgreSQL实例）
+- `collaboration_arango_integration_test.go` - Redis + PostgreSQL 消费流转并写入 Arango 账本图，再回查完整投递链路（需要Redis、PostgreSQL、ArangoDB实例）
 
 ## SQLite测试
 
@@ -80,6 +82,52 @@ go test -v -run Postgres
 - **JSONB类型**：JSON操作符（->, ->>）
 - **递归CTE**：层级数据查询
 
+## Redis 与协作链路测试
+
+需要运行 Redis 与 PostgreSQL 实例，通过环境变量配置连接：
+
+```bash
+export REDIS_HOST=localhost
+export REDIS_PORT=6379
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=55432
+
+go test -v -run 'Redis|Collaboration'
+```
+
+### 测试覆盖范围
+
+- **发布订阅闭环**：Subscribe + Publish 实际消息往返
+- **Redis Stream 协作消息**：envelope 写入、consumer group 读取、ACK
+- **多适配器联动**：Redis 接收协作请求，PostgreSQL 查询业务数据，再通过 Redis 返回结果
+
+## Redis + PostgreSQL + Arango 账本链路测试
+
+需要运行 Redis、PostgreSQL、ArangoDB 实例，通过环境变量配置连接：
+
+```bash
+export REDIS_HOST=localhost
+export REDIS_PORT=56379
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=55432
+export ARANGO_URI=http://localhost:58529
+export ARANGO_DB=_system
+
+go test -v -run 'ArangoLedgerEndToEnd|RedisPostgresConsumeAndArangoLedgerEndToEnd'
+```
+
+### 测试覆盖范围
+
+- **真实消费链路**：请求消息由 PostgreSQL 适配器消费并执行查询
+- **账本图落库**：请求与响应消息都写入 Arango message/request/adapter 节点与边
+- **全链路回查**：按 request_id 查询 sender -> message -> receiver 完整路径
+- **同后端双实例场景**：默认协作适配器与显式同后端适配器并行启动，分别执行同轮消息测试
+- **隔离验证**：Redis stream 不串流、Arango 账本按 namespace 隔离（即便 request_id 相同）
+- **故障恢复验证**：同后端双实例下覆盖 pending、claim、retry、dead-letter 恢复流程，确保恢复操作仅作用于各自流与组
+- **统一管理路径验证**：Redis 作为分组/心跳/状态控制面，Arango 投影 online_adapter_node 快照并可查询在线/离线节点
+- **受管适配器增量验证**：managed 与 explicit 在同消息场景下的行为一致（注册/心跳/消息回路/离线）
+- **TTL 一致性验证**：managed 与 explicit 节点在同 TTL 条件下均会被自动清理，避免僵尸节点残留
+
 ## MySQL测试
 
 需要运行MySQL实例，通过环境变量配置连接：
@@ -136,7 +184,7 @@ go test -v -run MySQL
 go test -v
 ```
 
-### SQLite + PostgreSQL + MySQL
+### SQLite + Redis + PostgreSQL + MySQL
 
 首先启动所有数据库容器，然后：
 

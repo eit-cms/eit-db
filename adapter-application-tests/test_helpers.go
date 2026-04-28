@@ -69,3 +69,18 @@ func sqlServerIntegrationConfig() *db.Config {
 		},
 	}
 }
+
+func arangoIntegrationConfig() *db.Config {
+	defaultURI := "http://" + getEnv("ARANGO_HOST", "localhost") + ":" + strconv.Itoa(getEnvInt("ARANGO_PORT", 58529))
+	return &db.Config{
+		Adapter: "arango",
+		Arango: &db.ArangoConnectionConfig{
+			URI:            getEnv("ARANGO_URI", defaultURI),
+			Database:       getEnv("ARANGO_DB", "_system"),
+			Username:       getEnv("ARANGO_USER", "root"),
+			Password:       getEnv("ARANGO_PASSWORD", ""),
+			Namespace:      getEnv("ARANGO_NAMESPACE", "collab_it"),
+			TimeoutSeconds: getEnvInt("ARANGO_TIMEOUT_SECONDS", 10),
+		},
+	}
+}

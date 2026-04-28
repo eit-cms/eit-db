@@ -33,6 +33,16 @@
 3. 保持旧 API 可用，通过兼容层渐进切换。 
 4. 所有新能力必须有最低限度集成测试。
 
+### 2.2.1 当前 API 边界决策（新增）
+
+当前阶段对执行 API 的约束如下：
+
+1. 保留统一应用层执行入口方向（ExecuteAuto / auto route）。
+2. 不继续单独推进 AQL/Cypher 的类事务 API 抽象。
+3. 若后续 Query 增强进入中心化执行路径，则优先考虑：
+	`aql like -> query ir -> adapter compiler -> database language/binary files`
+4. 因此 `ExecuteUnit` / 类事务语义必须在 Query IR 与 Adapter Compiler 边界明确后再决定，不提前冻结。
+
 ### 2.3 运行模式与架构分层（新增）
 
 本项目明确支持两种运行模式：
@@ -85,6 +95,37 @@
 1. 托管实例建议使用独立账号与最小权限。
 2. 不允许托管实例读写用户业务保留命名空间。
 3. 凭据来源与刷新策略需可审计。
+
+---
+
+## 2.5 协作消息层设计（新增）
+
+为替代“中心化调度器优先”路径，协作模式下新增消息协作主路径：
+
+1. Managed Redis 从“缓存能力”扩展为“缓存 + 消息协作者”。
+2. Managed Arango 承接消息持久化与图语义追踪（低层消息传递图，不引入高层社交语义）。
+3. 适配器间通信拆分为“请求”和“消息”两个层面：
+- 请求层：适配器发起协作请求，由协作层编排并下发。
+- 消息层：协作层通过 Redis 发送事件，并在 Arango 记录 sender/receiver/message 关系链。
+
+### 消息协作原则
+
+1. 主路径采用 Redis Streams + Consumer Group（持久、可重放、可转移消费）。
+2. 采用 at-least-once 语义，消费端必须幂等。
+3. 使用 ticks/version 字段记录消息发送版本与消费版本，辅助去重与乱序诊断。
+4. 消息堆积通过定时主动消费与重扫机制缓解（非仅依赖被动订阅）。
+5. 命名空间通过内部前缀 + GUID/UUID（可选雪花 ID）强隔离。
+
+### Arango 侧图模型（消息账本）
+
+1. 顶点 online_adapter_node：在线适配器实例元数据。
+2. 顶点 request_node：协作请求元数据。
+3. 顶点 message_node：消息元数据（topic/stream、ticks、状态）。
+4. 边 emits：adapter -> message。
+5. 边 delivers_to：message -> adapter。
+6. 边 belongs_to_request：message -> request。
+
+该模型用于追踪消息来源、投递路径、失败重试与因果关系，不替代业务实体关系图。
 
 ---
 
@@ -169,11 +210,49 @@
 
 ---
 
+## P1.5（并行 3-5 天）：协作消息总线最小落地（新增）
+
+### 目标
+
+在不引入复杂调度器重构的前提下，建立协作模式的事件通信主路径。
+
+### 范围
+
+1. 基于 Managed Redis 增加协作消息 stream（按 adapter/domain 分段）。
+2. 增加消息 envelope（message_id、request_id、trace_id、ticks、payload_ref）。
+3. 增加消费幂等记录（idempotency_key + consumed_tick）。
+4. 增加定时主动消费任务与积压重扫逻辑。
+5. 在 Managed Arango 写入 message_node/request_node/online_adapter_node 及三类边。
+6. 保留旧调度入口作为兼容 fallback（默认不作为主路径）。
+
+### 非目标
+
+1. 不实现全局消息编排优化器。
+2. 不实现跨消息事务一致性。
+3. 不实现通用消息中间件抽象（先固定 Redis 实现）。
+
+### 验收标准
+
+1. 至少 2 组适配器可通过协作消息链完成请求到投递闭环。
+2. 重复消息可被幂等拦截，ticks 版本可用于诊断。
+3. 积压消息可由主动消费任务显著回收（阈值可配置）。
+4. Arango 可查询 sender -> message -> receiver 与 request 关联链。
+
+---
+
 ## P2（1 周）：Blueprint 规范与最小运行时
 
 ### 目标
 
 先定义并落地 Blueprint 的最小可运行框架，作为后续 Query 增强和 Schema 重构的上位规范。
+
+### 当前落地状态（2026-04-24）
+
+1. 已新增 Go 侧 Blueprint 核心类型：datasets、entities、relations、module slots、cache policy。
+2. 已新增 Blueprint 校验器与 BlueprintRegistry。
+3. 已支持 JSON/YAML Blueprint 加载。
+4. 已支持 Repository 读取 Blueprint RouteHint，用于运行时路由提示。
+5. 当前仍不接管完整执行链，保持最小运行时边界。
 
 ### Blueprint 定位
 
@@ -213,6 +292,7 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 1. 至少 1 个 Blueprint 可通过校验并注册。 
 2. 查询入口可读取 Blueprint 元信息用于日志与路由提示。 
 3. 无 Blueprint 时系统行为保持兼容。
+4. Repository 可通过 BlueprintRegistry 按 Blueprint ID 解析 RouteHint。
 
 ---
 
@@ -299,6 +379,13 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 3. 执行器最小串联。 
 4. 结果写回存储。
 
+### 切片 E：协作消息层（Redis + Arango）
+
+1. Message envelope 与 ticks/version 协议。 
+2. Redis Stream 生产、消费、主动重扫。 
+3. 幂等键与消费版本记录。 
+4. Arango 消息账本图写入与查询。
+
 ---
 
 ## 5. 风险与回滚
@@ -310,6 +397,7 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 3. Query 增强与旧执行路径冲突。 
 4. Blueprint 过早做重导致推进变慢。
 5. 托管实例与用户实例配置混淆导致数据污染。
+6. 消息重复消费、乱序与积压导致协作结果抖动。
 
 ### 控制策略
 
@@ -318,6 +406,8 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 3. 关键路径保留旧执行 fallback。 
 4. Blueprint 先最小运行时，避免过度设计。
 5. 托管实例强制命名空间隔离并输出冲突告警。
+6. 统一消息 envelope，强制 idempotency_key + ticks/version 双校验。
+7. 增加主动消费与积压扫描定时任务，避免长时间失效消息堆积。
 
 ### 回滚方案
 
@@ -337,6 +427,8 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 4. Gate 拦截统计。
 5. 托管实例健康度、启停次数、降级次数。
 6. 用户实例与托管实例冲突告警计数。
+7. 消息生产/消费速率、积压长度、重试次数、死信数量。
+8. sender/request/message/receiver 图链路完整率。
 
 ### 测试
 
@@ -364,6 +456,10 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 10. 托管实例账号是否由系统自动创建还是用户预置。
 11. 托管实例失败时的默认策略：功能降级继续服务还是严格失败。
 12. 协作层模式默认是否启用托管实例观测面板。
+13. ticks 字段采用单调版本还是逻辑时钟方案。
+14. 主动消费定时任务的默认间隔与批次上限。
+15. 消息 ID 生成策略：UUID 还是雪花 ID（或混合）。
+16. online adapter 元数据的过期与下线判定策略。
 
 ---
 
@@ -374,3 +470,8 @@ Blueprint 是数据集级别的编排描述，不替代 Schema 本身。
 1. Arango Adapter 接口清单。 
 2. Arango Config 字段与默认值。 
 3. P0 对应测试清单与样例。
+
+执行任务清单（新增）：
+
+1. COLLAB_IMPLEMENTATION_TASKLIST.md（先 Redis subscriber 暴露，再 Arango MVP）。
+2. COLLAB_MESSAGE_PROTOCOL_DRAFT.md（消息协议与账本模型）。
