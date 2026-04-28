@@ -17,6 +17,8 @@ const (
 	StartupCapabilityFullTextRuntime = "full_text_runtime"
 	// StartupCapabilityRedisRuntime Redis 运行时能力矩阵。
 	StartupCapabilityRedisRuntime = "redis_runtime"
+	// StartupCapabilityArangoRuntime Arango 运行时能力。
+	StartupCapabilityArangoRuntime = "arango_runtime"
 )
 
 const (
@@ -28,6 +30,7 @@ var supportedStartupCapabilities = []string{
 	StartupCapabilityJSONRuntime,
 	StartupCapabilityFullTextRuntime,
 	StartupCapabilityRedisRuntime,
+	StartupCapabilityArangoRuntime,
 }
 
 // StartupCapabilityConfig 启动期能力体检配置。
@@ -115,7 +118,11 @@ func (r *Repository) RunStartupCapabilityCheck(ctx context.Context, cfg *Startup
 	requiredList := uniqueCapabilityNames(cfg.Required)
 	metadata := r.resolveAdapterMetadata(r.adapter)
 	if len(inspectList) == 0 {
-		inspectList = append(inspectList, StartupCapabilityJSONRuntime, StartupCapabilityFullTextRuntime)
+		if metadata.Name == "arango" {
+			inspectList = append(inspectList, StartupCapabilityArangoRuntime)
+		} else {
+			inspectList = append(inspectList, StartupCapabilityJSONRuntime, StartupCapabilityFullTextRuntime)
+		}
 		if metadata.Name == "redis" {
 			inspectList = append(inspectList, StartupCapabilityRedisRuntime)
 		}
@@ -267,6 +274,43 @@ func (r *Repository) RunStartupCapabilityCheck(ctx context.Context, cfg *Startup
 				check.Status = "degraded"
 				if enforced {
 					strictFailures = append(strictFailures, capability+": required features degraded")
+				}
+			}
+
+		case StartupCapabilityArangoRuntime:
+			inspector, ok := r.adapter.(ArangoRuntimeInspector)
+			check.InspectorAvailable = ok
+			if !ok {
+				check.Status = "unavailable"
+				check.Supported = false
+				check.Notes = "adapter does not implement ArangoRuntimeInspector"
+				if enforced {
+					strictFailures = append(strictFailures, capability+": inspector unavailable")
+				}
+				break
+			}
+
+			runtime, err := inspector.InspectArangoRuntime(ctx)
+			if err != nil {
+				check.Status = "error"
+				check.Supported = false
+				check.Error = err.Error()
+				if enforced {
+					strictFailures = append(strictFailures, capability+": inspect error")
+				}
+				break
+			}
+
+			check.Supported = runtime != nil && runtime.NativeSupported
+			if runtime != nil {
+				check.Notes = runtime.Notes
+			}
+			if check.Supported {
+				check.Status = "ok"
+			} else {
+				check.Status = "degraded"
+				if enforced {
+					strictFailures = append(strictFailures, capability+": not supported")
 				}
 			}
 		}

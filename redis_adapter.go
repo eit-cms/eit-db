@@ -569,6 +569,12 @@ func (a *RedisAdapter) Subscribe(ctx context.Context, channels ...string) *redis
 	return a.client.Subscribe(ctx, channels...)
 }
 
+// PSubscribe 按模式订阅一个或多个频道。
+// 调用方负责在使用完毕后调用 pubSub.Close()。
+func (a *RedisAdapter) PSubscribe(ctx context.Context, patterns ...string) *redis.PubSub {
+	return a.client.PSubscribe(ctx, patterns...)
+}
+
 // ==================== 管道 / 事务 ====================
 
 // Pipelined 在管道中批量执行命令，减少网络往返。

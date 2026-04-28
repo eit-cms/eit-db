@@ -156,3 +156,13 @@ if qf.HasQueryFeature("json_path") {
 - Query Features 系统：请参考 .dev-docs/QUERY_FEATURES.md
 - Adapter 注册与工作流：请参考 .dev-docs/ADAPTER_WORKFLOW.md
 - v1.0.0 路线图：请参考 .dev-docs/v1.0.0_ROADMAP.md
+
+## 6. 配置系统演进（vNext）
+
+配置系统将从“构建式入口优先”演进为“声明式优先，构建式补充”。
+
+1. 运行时拓扑（适配器、协作层、Blueprint、Schema、Relation、Query Module）优先由声明文件驱动。
+2. 新能力优先在 TOML 清单中表达，YAML/JSON 作为兼容层保留。
+3. 构建式 API 保留用于局部覆盖与调试，而不是主配置来源。
+
+详见：[docs/DECLARATIVE_CONFIG_TOML_vNEXT.md](docs/DECLARATIVE_CONFIG_TOML_vNEXT.md)

@@ -8,6 +8,10 @@ Neo4j 适配器提供图数据库接入，支持 Cypher 查询语言、原生图
 - **驱动包**：`github.com/neo4j/neo4j-go-driver/v5`
 - **特性等级**：图数据库 / Cypher / 非 SQL
 
+关系语义支持等级：强支持（图关系为 first-class）。
+
+> vNext 方向：对外 API 将逐步收敛为后端无关的统一 `Query/Exec` 入口，由适配器自动映射到 Cypher；本文中的 `QueryCypher/ExecCypher` 可视为当前阶段的显式能力入口与兼容路径。
+
 ## 快速开始
 
 ```go
@@ -104,7 +108,7 @@ cypher, args, err := qc.
 // cypher: MATCH (u:User) WHERE u.active = $p1 AND u.age > $p2 RETURN u.id, u.name, u.email ORDER BY u.name ASC SKIP 0 LIMIT 20
 ```
 
-### JOIN 语义映射
+### 关系语义映射（图语义优先）
 
 | SQL JOIN 类型 | Cypher 等价 | 降级策略 |
 |---|---|---|
@@ -112,6 +116,8 @@ cypher, args, err := qc.
 | LEFT JOIN | `OPTIONAL MATCH (a)-[r:REL]->(b)` | 原生支持 |
 | CROSS JOIN | 多个独立 `MATCH` 子句 | 原生支持 |
 | RIGHT JOIN | ❌ 不支持 | 返回错误（无降级） |
+
+说明：该表仅用于迁移对照。Neo4j 的主表达方式是“关系边 + 路径遍历”，不建议以 SQL JOIN 覆盖率评估图语义能力。
 
 ```go
 qc.Join("Company", "WORKS_AT", "c")          // → MATCH (n)-[r1:WORKS_AT]->(c:Company)

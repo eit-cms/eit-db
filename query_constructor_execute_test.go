@@ -5,14 +5,15 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 type routingHookTestAdapter struct{}
 
 func (a *routingHookTestAdapter) Connect(ctx context.Context, config *Config) error { return nil }
-func (a *routingHookTestAdapter) Close() error                                       { return nil }
-func (a *routingHookTestAdapter) Ping(ctx context.Context) error                     { return nil }
+func (a *routingHookTestAdapter) Close() error                                      { return nil }
+func (a *routingHookTestAdapter) Ping(ctx context.Context) error                    { return nil }
 func (a *routingHookTestAdapter) Begin(ctx context.Context, opts ...interface{}) (Tx, error) {
 	return nil, fmt.Errorf("not supported")
 }
@@ -638,6 +639,58 @@ func TestExecuteQueryConstructorAutoNeo4jExecRouting(t *testing.T) {
 	_, err = repo.ExecuteQueryConstructorAuto(context.Background(), qc)
 	if err == nil {
 		t.Fatalf("expected not connected neo4j error")
+	}
+}
+
+func TestExecuteAutoSQLiteQueryAndExec(t *testing.T) {
+	cfg := &Config{
+		Adapter: "sqlite",
+		SQLite: &SQLiteConnectionConfig{
+			Path: filepath.Join(t.TempDir(), "execute-auto-sqlite.db"),
+		},
+	}
+	repo, err := NewRepository(cfg)
+	if err != nil {
+		t.Fatalf("create repository failed: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if _, err := repo.Exec(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create table failed: %v", err)
+	}
+
+	execResult, err := repo.ExecuteAuto(ctx, "INSERT INTO users (id, name) VALUES (?, ?)", 1, "alice")
+	if err != nil {
+		t.Fatalf("execute auto insert failed: %v", err)
+	}
+	if execResult.Mode != "exec" {
+		t.Fatalf("expected exec mode, got %s", execResult.Mode)
+	}
+	if execResult.Exec == nil || execResult.Exec.RowsAffected != 1 {
+		t.Fatalf("expected rows affected=1, got %+v", execResult.Exec)
+	}
+
+	queryResult, err := repo.ExecuteAuto(ctx, "SELECT id, name FROM users WHERE id = ?", 1)
+	if err != nil {
+		t.Fatalf("execute auto select failed: %v", err)
+	}
+	if queryResult.Mode != "query" {
+		t.Fatalf("expected query mode, got %s", queryResult.Mode)
+	}
+	if len(queryResult.Rows) != 1 || queryResult.Rows[0]["name"] != "alice" {
+		t.Fatalf("unexpected query rows: %+v", queryResult.Rows)
+	}
+}
+
+func TestExecuteAutoArangoDescriptorRouting(t *testing.T) {
+	repo := &Repository{adapter: &ArangoAdapter{}, adapterType: "arango"}
+	_, err := repo.ExecuteAuto(context.Background(), "FOR d IN users RETURN d")
+	if err == nil {
+		t.Fatalf("expected arango runtime error when adapter is not connected")
+	}
+	if !strings.Contains(err.Error(), "arango client not connected") {
+		t.Fatalf("unexpected arango error: %v", err)
 	}
 }
 
