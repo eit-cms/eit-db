@@ -52,3 +52,6 @@ examples/*/data/
 # Temporary files
 tmp/
 temp/
+
+# Adapter integration test logs
+adapter-application-tests/*.log
