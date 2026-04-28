@@ -99,7 +99,7 @@ func redisIntegrationConfig() *db.Config {
 		Redis: &db.RedisConnectionConfig{
 			URI:      getEnv("REDIS_URI", ""),
 			Host:     getEnv("REDIS_HOST", "localhost"),
-			Port:     getEnvInt("REDIS_PORT", 6379),
+			Port:     getEnvInt("REDIS_PORT", 56379),
 			Username: getEnv("REDIS_USERNAME", ""),
 			Password: getEnv("REDIS_PASSWORD", ""),
 			DB:       getEnvInt("REDIS_DB", 0),
