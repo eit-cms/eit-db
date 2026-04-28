@@ -109,18 +109,6 @@ services:
         reservations:
           memory: 2G
 
-  # Redis 7
-  redis:
-    image: redis:7-alpine
-    container_name: eit-db-redis
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   # MongoDB 7
   mongodb:
     image: mongo:7
