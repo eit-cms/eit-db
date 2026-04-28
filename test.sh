@@ -38,6 +38,15 @@ print_warning() {
     echo -e "${YELLOW}⚠ $1${NC}"
 }
 
+# 统一 compose 调用（优先 docker compose，兼容 docker-compose）
+compose() {
+    if docker compose version > /dev/null 2>&1; then
+        docker compose "$@"
+    else
+        docker-compose "$@"
+    fi
+}
+
 # 检查Docker是否运行
 check_docker() {
     if ! command -v docker &> /dev/null; then
@@ -66,47 +75,70 @@ start_databases() {
     cd "$SCRIPT_DIR"
     
     print_warning "删除旧容器..."
-    docker-compose down 2>/dev/null || true
+    compose down 2>/dev/null || true
     
     print_warning "启动新容器..."
-    docker-compose up -d
+    compose up -d
     
     # 等待数据库就绪
     print_warning "等待数据库就绪..."
     sleep 5
     
     # 检查PostgreSQL
-    if docker-compose ps postgres | grep -q "healthy\|running"; then
+    if compose ps postgres | grep -q "healthy\|running"; then
         print_success "PostgreSQL 已就绪"
     else
         print_warning "PostgreSQL 启动缓慢，继续等待..."
         sleep 10
     fi
 
-    # 检查Redis
-    if docker-compose ps redis | grep -q "healthy\|running"; then
-        print_success "Redis 已就绪"
-    else
-        print_warning "Redis 启动缓慢，继续等待..."
-        sleep 5
-    fi
-
-    # 检查ArangoDB
-    if docker-compose ps arango | grep -q "healthy\|running"; then
+    # 检查ArangoDB（协作链路场景可选）
+    if compose ps arango | grep -q "healthy\|running"; then
         print_success "ArangoDB 已就绪"
     else
-        print_warning "ArangoDB 启动缓慢，继续等待..."
-        sleep 10
+        print_warning "ArangoDB 未就绪（仅影响协作链路专项测试）"
     fi
     
     # 检查MySQL
-    if docker-compose ps mysql | grep -q "healthy\|running"; then
+    if compose ps mysql | grep -q "healthy\|running"; then
         print_success "MySQL 已就绪"
     else
         print_warning "MySQL 启动缓慢，继续等待..."
         sleep 10
     fi
     
+    # 检查SQL Server
+    if compose ps sqlserver | grep -q "healthy\|running"; then
+        print_success "SQL Server 已就绪"
+    else
+        print_warning "SQL Server 启动缓慢，继续等待..."
+        sleep 15
+    fi
+
+    # 检查Redis
+    if compose ps redis | grep -q "healthy\|running"; then
+        print_success "Redis 已就绪"
+    else
+        print_warning "Redis 启动缓慢，继续等待..."
+        sleep 5
+    fi
+
+    # 检查MongoDB
+    if compose ps mongodb | grep -q "healthy\|running"; then
+        print_success "MongoDB 已就绪"
+    else
+        print_warning "MongoDB 启动缓慢，继续等待..."
+        sleep 10
+    fi
+
+    # 检查Neo4j
+    if compose ps neo4j | grep -q "healthy\|running"; then
+        print_success "Neo4j 已就绪"
+    else
+        print_warning "Neo4j 启动缓慢，继续等待..."
+        sleep 20
+    fi
+
     print_success "所有数据库已启动"
 }
 
@@ -119,7 +151,7 @@ stop_databases() {
     fi
     
     cd "$SCRIPT_DIR"
-    docker-compose down
+    compose down
     print_success "数据库已停止"
 }
 
@@ -151,43 +183,32 @@ run_integration_tests() {
         go mod edit -replace github.com/eit-cms/eit-db=../
     fi
     
-    # 运行SQLite测试（无需依赖）
-    print_warning "运行SQLite集成测试..."
-    if go test -v -run SQLite 2>&1 | tee sqlite_test.log; then
-        print_success "SQLite集成测试通过"
+    print_warning "运行适配器集成测试（SQLite/PostgreSQL/MySQL/SQL Server/Redis/MongoDB/Neo4j）..."
+    if go test ./... -v 2>&1 | tee integration_test.log; then
+        print_success "适配器集成测试通过"
     else
-        print_error "SQLite集成测试失败"
+        print_error "适配器集成测试失败"
         return 1
     fi
 
-    # 运行Redis + PostgreSQL 协作链路测试
-    print_warning "运行Redis + PostgreSQL 协作集成测试..."
-    if go test -v -run 'TestRedisIntegrationPublishSubscribeRoundTrip|TestRedisPostgresCollaborationStreamRoundTrip' 2>&1 | tee redis_collab_test.log; then
-        print_success "Redis + PostgreSQL 协作集成测试通过"
-    else
-        print_error "Redis + PostgreSQL 协作集成测试失败"
-        return 1
-    fi
+    # 可选：专项协作链路测试（默认不重复执行，避免与 ./... 重复）
+    if [ "${RUN_COLLAB_FOCUSED:-0}" = "1" ]; then
+        print_warning "RUN_COLLAB_FOCUSED=1，执行协作链路专项测试..."
 
-    # 运行Redis + PostgreSQL + Arango 账本端到端测试
-    print_warning "运行Redis + PostgreSQL + Arango 账本集成测试..."
-    if go test -v -run 'TestRedisPostgresConsumeAndArangoLedgerEndToEnd|TestDualRedisAdaptersSameBackendRoundTripIsolation|TestDualArangoAdaptersSameBackendNamespaceIsolation|TestDualRedisAdaptersSameBackendPendingClaimRetryIsolation|TestDualRedisAdaptersSameBackendDeadLetterIsolation|TestRedisArangoUnifiedManagementPath|TestManagedAndExplicitAdaptersBehaviorParityInSameScenario|TestManagedAndExplicitAdaptersTTLAutoCleanupParity' 2>&1 | tee arango_collab_test.log; then
-        print_success "Redis + PostgreSQL + Arango 账本集成测试通过"
-    else
-        print_error "Redis + PostgreSQL + Arango 账本集成测试失败"
-        return 1
-    fi
-    
-    # 如果设置了TEST_MODE=all，运行其他数据库测试
-    if [ "$TEST_MODE" = "all" ]; then
-        if [ ! -z "$POSTGRES_DSN" ]; then
-            print_warning "运行PostgreSQL集成测试..."
-            go test -v -run Postgres 2>&1 | tee postgres_test.log || print_warning "PostgreSQL测试跳过或失败"
+        print_warning "运行Redis + PostgreSQL 协作集成测试..."
+        if go test -v -run 'TestRedisIntegrationPublishSubscribeRoundTrip|TestRedisPostgresCollaborationStreamRoundTrip' 2>&1 | tee redis_collab_test.log; then
+            print_success "Redis + PostgreSQL 协作集成测试通过"
+        else
+            print_error "Redis + PostgreSQL 协作集成测试失败"
+            return 1
         fi
-        
-        if [ ! -z "$MYSQL_DSN" ]; then
-            print_warning "运行MySQL集成测试..."
-            go test -v -run MySQL 2>&1 | tee mysql_test.log || print_warning "MySQL测试跳过或失败"
+
+        print_warning "运行Redis + PostgreSQL + Arango 账本集成测试..."
+        if go test -v -run 'TestRedisPostgresConsumeAndArangoLedgerEndToEnd|TestDualRedisAdaptersSameBackendRoundTripIsolation|TestDualArangoAdaptersSameBackendNamespaceIsolation|TestDualRedisAdaptersSameBackendPendingClaimRetryIsolation|TestDualRedisAdaptersSameBackendDeadLetterIsolation|TestRedisArangoUnifiedManagementPath|TestManagedAndExplicitAdaptersBehaviorParityInSameScenario|TestManagedAndExplicitAdaptersTTLAutoCleanupParity' 2>&1 | tee arango_collab_test.log; then
+            print_success "Redis + PostgreSQL + Arango 账本集成测试通过"
+        else
+            print_error "Redis + PostgreSQL + Arango 账本集成测试失败"
+            return 1
         fi
     fi
 }
@@ -285,9 +306,12 @@ EIT-DB 集成测试运行脚本
     ./test.sh stop
 
 环境变量:
-    TEST_MODE      - 设置为 "all" 运行所有数据库测试，"sqlite" 仅运行SQLite
-    POSTGRES_DSN   - PostgreSQL 连接字符串
-    MYSQL_DSN      - MySQL 连接字符串
+    POSTGRES_DSN   - PostgreSQL 连接字符串（可选）
+    MYSQL_DSN      - MySQL 连接字符串（可选）
+    SQLSERVER_DSN  - SQL Server 连接字符串（可选）
+    REDIS_URI      - Redis 连接地址（可选）
+    MONGODB_URI    - MongoDB 连接地址（可选）
+    NEO4J_URI      - Neo4j 连接地址（可选）
     ARANGO_URI     - ArangoDB 连接地址（默认 http://localhost:58529）
 
 EOF

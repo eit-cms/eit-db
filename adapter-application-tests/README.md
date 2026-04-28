@@ -2,6 +2,8 @@
 
 本目录包含适用于所有数据库适配器的集成测试套件。
 
+> 约定：集成测试以项目根目录 [docker-compose.yml](../docker-compose.yml) 作为官方环境基线。外部后端不可用时，测试会直接失败而不是 skip。
+
 ## 范围说明
 
 - 本目录用于验证 Adapter 查询/方言能力与跨库兼容行为。
@@ -13,6 +15,10 @@
 - `sqlite_integration_test.go` - SQLite适配器集成测试（无依赖，可直接运行）
 - `postgres_integration_test.go` - PostgreSQL适配器集成测试（需要PostgreSQL实例）
 - `mysql_integration_test.go` - MySQL适配器集成测试（需要MySQL实例）
+- `sqlserver_integration_test.go` - SQL Server 适配器集成测试（需要 SQL Server 实例）
+- `redis_integration_test.go` - Redis 适配器集成测试（需要 Redis 实例）
+- `mongo_integration_test.go` - MongoDB 适配器集成测试（需要 MongoDB 实例）
+- `neo4j_integration_test.go` - Neo4j 适配器集成测试（需要 Neo4j 实例）
 - `collaboration_integration_test.go` - Redis消息交互与 Redis + PostgreSQL 协作链路测试（需要Redis与PostgreSQL实例）
 - `collaboration_arango_integration_test.go` - Redis + PostgreSQL 消费流转并写入 Arango 账本图，再回查完整投递链路（需要Redis、PostgreSQL、ArangoDB实例）
 
@@ -184,16 +190,19 @@ go test -v -run MySQL
 go test -v
 ```
 
-### SQLite + Redis + PostgreSQL + MySQL
+### 多后端（SQLite + PostgreSQL + MySQL + SQL Server + Redis + MongoDB + Neo4j + 协作链路）
 
 首先启动所有数据库容器，然后：
 
 ```bash
-# 使用docker-compose
-docker-compose up -d
+# 在仓库根目录使用官方 compose 启动
+cd .. && docker compose up -d
 
-# 设置环境变量
-source .env
+# 等待服务健康检查通过（可选）
+docker compose ps
+
+# 回到当前目录
+cd adapter-application-tests
 
 # 运行所有测试
 go test -v
@@ -224,45 +233,9 @@ PASS
 ok      adapter-application-tests       1.614s
 ```
 
-## Docker Compose 配置
+## 环境变量（可选覆盖默认值）
 
-创建 `docker-compose.yml`：
-
-```yaml
-version: '3.8'
-
-services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: testuser
-      POSTGRES_PASSWORD: testpass
-      POSTGRES_DB: testdb
-    ports:
-      - "55432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U testuser"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: rootpass
-      MYSQL_USER: testuser
-      MYSQL_PASSWORD: testpass
-      MYSQL_DATABASE: testdb
-    ports:
-      - "3306:3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-```
-
-创建 `.env`：
+默认值已与官方 `docker-compose.yml` 对齐；仅在你自定义端口/账号时需要覆盖：
 
 ```bash
 # PostgreSQL
@@ -277,20 +250,44 @@ MYSQL_USER=testuser
 MYSQL_PASSWORD=testpass
 MYSQL_DB=testdb
 MYSQL_DSN=testuser:testpass@tcp(localhost:3306)/testdb
+
+# SQL Server
+SQLSERVER_HOST=localhost
+SQLSERVER_PORT=1433
+SQLSERVER_USER=sa
+SQLSERVER_PASSWORD=Test@1234
+SQLSERVER_DATABASE=testdb
+
+# Redis
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+
+# MongoDB
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DATABASE=testdb
+
+# Neo4j
+NEO4J_URI=neo4j://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=neo4jtest
+NEO4J_DATABASE=neo4j
 ```
 
 ## 测试设计原则
 
-1. **逐数据库增进**：从SQLite开始，逐步支持PostgreSQL、MySQL等
+1. **逐数据库增进**：从SQLite开始，逐步支持PostgreSQL、MySQL、SQL Server、Redis、MongoDB、Neo4j
 2. **功能覆盖**：覆盖QueryFeatures中声明的所有特性
 3. **版本敏感**：标记每个特性的最小版本要求
-4. **错误处理**：处理环境配置缺失时的skip行为
+4. **错误处理**：官方环境不可用时直接失败，阻止假阳性
 5. **隔离清理**：每个测试都清理自己创建的数据和对象
 
 ## 待办事项
 
-- [ ] SQL Server适配器集成测试
-- [ ] MongoDB适配器集成测试
+- [x] SQL Server适配器集成测试
+- [x] MongoDB适配器集成测试
+- [x] Redis适配器集成测试
+- [x] Neo4j适配器集成测试
 - [ ] 性能基准测试
 - [ ] 并发访问测试
 - [ ] 连接池测试

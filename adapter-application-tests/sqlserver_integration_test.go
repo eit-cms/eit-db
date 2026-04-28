@@ -11,24 +11,24 @@ import (
 func setupSQLServerRepo(t *testing.T) (*db.Repository, func()) {
 	config := sqlServerIntegrationConfig()
 	if err := config.Validate(); err != nil {
-		t.Skipf("SQL Server 配置无效: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "SQL Server", err)
 	}
 
 	if err := ensureSQLServerDatabase(config); err != nil {
-		t.Skipf("SQL Server 初始化失败: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "SQL Server", err)
 	}
 
 	repo, err := db.NewRepository(config)
 	if err != nil {
-		t.Skipf("SQL Server 不可用: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "SQL Server", err)
+	}
+
+	if err := repo.Connect(context.Background()); err != nil {
+		failIntegrationEnv(t, "SQL Server", err)
 	}
 
 	if err := repo.Ping(context.Background()); err != nil {
-		t.Skipf("SQL Server 连接失败: %v", err)
-		return nil, nil
+		failIntegrationEnv(t, "SQL Server", err)
 	}
 
 	cleanup := func() {

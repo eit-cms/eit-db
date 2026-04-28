@@ -3,9 +3,17 @@ package adapter_tests
 import (
 	"os"
 	"strconv"
+	"testing"
 
 	db "github.com/eit-cms/eit-db"
 )
+
+const officialIntegrationEnvHint = "请先在仓库根目录执行 `docker compose up -d`（项目官方测试镜像），并等待容器健康检查通过。"
+
+func failIntegrationEnv(t *testing.T, backend string, err error) {
+	t.Helper()
+	t.Fatalf("%s 集成测试环境不可用: %v\n%s", backend, err, officialIntegrationEnvHint)
+}
 
 func getEnv(key, fallback string) string {
 	value := os.Getenv(key)
@@ -81,6 +89,42 @@ func arangoIntegrationConfig() *db.Config {
 			Password:       getEnv("ARANGO_PASSWORD", ""),
 			Namespace:      getEnv("ARANGO_NAMESPACE", "collab_it"),
 			TimeoutSeconds: getEnvInt("ARANGO_TIMEOUT_SECONDS", 10),
+		},
+	}
+}
+
+func redisIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "redis",
+		Redis: &db.RedisConnectionConfig{
+			URI:      getEnv("REDIS_URI", ""),
+			Host:     getEnv("REDIS_HOST", "localhost"),
+			Port:     getEnvInt("REDIS_PORT", 6379),
+			Username: getEnv("REDIS_USERNAME", ""),
+			Password: getEnv("REDIS_PASSWORD", ""),
+			DB:       getEnvInt("REDIS_DB", 0),
+		},
+	}
+}
+
+func mongoIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "mongodb",
+		MongoDB: &db.MongoConnectionConfig{
+			URI:      getEnv("MONGODB_URI", "mongodb://localhost:27017"),
+			Database: getEnv("MONGODB_DATABASE", "testdb"),
+		},
+	}
+}
+
+func neo4jIntegrationConfig() *db.Config {
+	return &db.Config{
+		Adapter: "neo4j",
+		Neo4j: &db.Neo4jConnectionConfig{
+			URI:      getEnv("NEO4J_URI", "neo4j://localhost:7687"),
+			Username: getEnv("NEO4J_USER", "neo4j"),
+			Password: getEnv("NEO4J_PASSWORD", "neo4jtest"),
+			Database: getEnv("NEO4J_DATABASE", "neo4j"),
 		},
 	}
 }
