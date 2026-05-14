@@ -407,11 +407,18 @@ func TestChangesetAccessorsAndMutations(t *testing.T) {
 	if cs.ToMap()["name"] != "bob" {
 		t.Fatalf("expected ToMap to reflect changed values")
 	}
-	if cs.action() != ActionUpdate {
-		t.Fatalf("expected action to resolve to update after previous values exist")
+	if cs.Action() != ActionInsert {
+		t.Fatalf("expected default action to be insert")
+	}
+	cs.SetAction(ActionUpdate)
+	if cs.Action() != ActionUpdate {
+		t.Fatalf("expected SetAction to change action to update")
 	}
 	if cs.ApplyAction(ActionDelete) != cs {
 		t.Fatalf("expected ApplyAction to return receiver")
+	}
+	if cs.Action() != ActionDelete {
+		t.Fatalf("expected ApplyAction to persist action")
 	}
 }
 
@@ -506,5 +513,82 @@ func TestValidateWithContextPropagatesLocale(t *testing.T) {
 	csZH.ValidateWithContext(ctxZH)
 	if csZH.IsValid() {
 		t.Fatalf("expected US ZIP to fail under zh-CN context locale")
+	}
+}
+
+func TestValidateForUpdateOnlyChecksChangedFields(t *testing.T) {
+	schema := NewBaseSchema("pages")
+	schema.AddField(NewField("id", TypeInteger).Null(false).Build())
+	schema.AddField(NewField("slug", TypeString).Null(false).Build())
+	schema.AddField(NewField("title", TypeString).Null(false).Build())
+	schema.AddField(NewField("published", TypeBoolean).Null(false).Build())
+
+	patch := map[string]interface{}{
+		"published": true,
+	}
+
+	cs := NewChangeset(schema).Cast(patch).ValidateForUpdate()
+	if !cs.IsValid() {
+		t.Fatalf("expected update patch to pass ValidateForUpdate, errors: %v", cs.Errors())
+	}
+
+	fullValidate := NewChangeset(schema).Cast(patch).Validate()
+	if fullValidate.IsValid() {
+		t.Fatalf("expected Validate to keep full required semantics")
+	}
+	if _, ok := fullValidate.Errors()["title"]; !ok {
+		t.Fatalf("expected Validate to report missing required field 'title', errors: %v", fullValidate.Errors())
+	}
+}
+
+func TestValidateForUpdateRequiredOnChangedField(t *testing.T) {
+	schema := NewBaseSchema("pages")
+	schema.AddField(NewField("title", TypeString).Null(false).Build())
+	schema.AddField(NewField("published", TypeBoolean).Null(false).Build())
+
+	cs := NewChangeset(schema).Cast(map[string]interface{}{
+		"title": "",
+	}).ValidateForUpdate()
+
+	if cs.IsValid() {
+		t.Fatalf("expected changed required field to fail ValidateForUpdate")
+	}
+	if _, ok := cs.Errors()["title"]; !ok {
+		t.Fatalf("expected ValidateForUpdate required error on title, errors: %v", cs.Errors())
+	}
+}
+
+func TestActionDrivenValidationSemantics(t *testing.T) {
+	schema := NewBaseSchema("pages")
+	schema.AddField(NewField("id", TypeInteger).Null(false).Build())
+	schema.AddField(NewField("title", TypeString).Null(false).Build())
+	schema.AddField(NewField("published", TypeBoolean).Null(false).Build())
+
+	patch := map[string]interface{}{
+		"published": true,
+	}
+
+	insertLike := NewChangeset(schema).Cast(patch).SetAction(ActionInsert).Validate()
+	if insertLike.IsValid() {
+		t.Fatalf("expected insert action to fail when required fields are missing")
+	}
+
+	updateLike := NewChangeset(schema).Cast(patch).SetAction(ActionUpdate).Validate()
+	if !updateLike.IsValid() {
+		t.Fatalf("expected update action to validate changed fields only, errors: %v", updateLike.Errors())
+	}
+
+	upsertWithoutBaseline := NewChangeset(schema).Cast(patch).SetAction(ActionUpsert).Validate()
+	if upsertWithoutBaseline.IsValid() {
+		t.Fatalf("expected upsert action to fail when required fields are absent in both data and changes")
+	}
+
+	upsertWithBaseline := FromMap(schema, map[string]interface{}{
+		"id":        1,
+		"title":     "hello",
+		"published": false,
+	}).PutChange("published", true).SetAction(ActionUpsert).Validate()
+	if !upsertWithBaseline.IsValid() {
+		t.Fatalf("expected upsert action to pass when required baseline exists, errors: %v", upsertWithBaseline.Errors())
 	}
 }

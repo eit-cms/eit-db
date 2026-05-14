@@ -27,6 +27,9 @@ type Changeset struct {
 	// 变更前的值（用于追踪）
 	previousValues map[string]interface{}
 
+	// 当前 changeset 的操作语义（insert/update/upsert）
+	action Action
+
 	// 锁
 	mu sync.RWMutex
 }
@@ -40,6 +43,7 @@ func NewChangeset(schema Schema) *Changeset {
 		schema:         schema,
 		valid:          true,
 		previousValues: make(map[string]interface{}),
+		action:         ActionInsert,
 	}
 }
 
@@ -97,14 +101,14 @@ func (cs *Changeset) Cast(data map[string]interface{}) *Changeset {
 func (cs *Changeset) Validate() *Changeset {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	return cs.validateLocked(GetValidationLocale())
+	return cs.validateLocked(GetValidationLocale(), cs.action)
 }
 
 // ValidateWithLocale 使用指定 locale 执行验证。
 func (cs *Changeset) ValidateWithLocale(locale string) *Changeset {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	return cs.validateLocked(locale)
+	return cs.validateLocked(locale, cs.action)
 }
 
 // ValidateWithContext 从上下文读取 locale 执行验证。
@@ -112,7 +116,68 @@ func (cs *Changeset) ValidateWithContext(ctx context.Context) *Changeset {
 	return cs.ValidateWithLocale(ValidationLocaleFromContext(ctx))
 }
 
-func (cs *Changeset) validateLocked(locale string) *Changeset {
+// ValidateForInsert 验证插入场景（全字段 required 语义）。
+func (cs *Changeset) ValidateForInsert() *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(GetValidationLocale(), ActionInsert)
+}
+
+// ValidateForInsertWithLocale 使用指定 locale 验证插入场景。
+func (cs *Changeset) ValidateForInsertWithLocale(locale string) *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(locale, ActionInsert)
+}
+
+// ValidateForInsertWithContext 从上下文读取 locale 验证插入场景。
+func (cs *Changeset) ValidateForInsertWithContext(ctx context.Context) *Changeset {
+	return cs.ValidateForInsertWithLocale(ValidationLocaleFromContext(ctx))
+}
+
+// ValidateForUpdate 验证更新场景（仅校验变更字段）。
+func (cs *Changeset) ValidateForUpdate() *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(GetValidationLocale(), ActionUpdate)
+}
+
+// ValidateForUpdateWithLocale 使用指定 locale 验证更新场景（仅校验变更字段）。
+func (cs *Changeset) ValidateForUpdateWithLocale(locale string) *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(locale, ActionUpdate)
+}
+
+// ValidateForUpdateWithContext 从上下文读取 locale 验证更新场景（仅校验变更字段）。
+func (cs *Changeset) ValidateForUpdateWithContext(ctx context.Context) *Changeset {
+	return cs.ValidateForUpdateWithLocale(ValidationLocaleFromContext(ctx))
+}
+
+// ValidateForUpsert 验证 upsert 场景。
+// 语义：
+// 1. 变更字段按 required + validator 校验。
+// 2. required 字段若在 data/changes 中都不存在，则判定为缺失。
+// 3. 未变更但已存在于 data 的字段不重复执行 validator。
+func (cs *Changeset) ValidateForUpsert() *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(GetValidationLocale(), ActionUpsert)
+}
+
+// ValidateForUpsertWithLocale 使用指定 locale 验证 upsert 场景。
+func (cs *Changeset) ValidateForUpsertWithLocale(locale string) *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	return cs.validateLocked(locale, ActionUpsert)
+}
+
+// ValidateForUpsertWithContext 从上下文读取 locale 验证 upsert 场景。
+func (cs *Changeset) ValidateForUpsertWithContext(ctx context.Context) *Changeset {
+	return cs.ValidateForUpsertWithLocale(ValidationLocaleFromContext(ctx))
+}
+
+func (cs *Changeset) validateLocked(locale string, action Action) *Changeset {
 	cs.errors = make(map[string][]string) // 清空之前的错误
 	cs.valid = true
 
@@ -120,18 +185,50 @@ func (cs *Changeset) validateLocked(locale string) *Changeset {
 		locale = GetValidationLocale()
 	}
 
+	action = normalizeAction(action)
+
 	for _, field := range cs.schema.Fields() {
-		value, exists := cs.data[field.Name]
+		var (
+			value              interface{}
+			exists             bool
+			shouldCheckRequired bool
+			shouldRunValidators bool
+		)
+
+		switch action {
+		case ActionUpdate:
+			value, exists = cs.changes[field.Name]
+			if !exists {
+				continue
+			}
+			shouldCheckRequired = true
+			shouldRunValidators = true
+		case ActionUpsert:
+			if changedValue, changed := cs.changes[field.Name]; changed {
+				value = changedValue
+				exists = true
+				shouldCheckRequired = true
+				shouldRunValidators = true
+			} else {
+				value, exists = cs.data[field.Name]
+				shouldCheckRequired = !exists
+				shouldRunValidators = false
+			}
+		default: // ActionInsert
+			value, exists = cs.data[field.Name]
+			shouldCheckRequired = true
+			shouldRunValidators = exists && value != nil
+		}
 
 		// 检查必填字段
-		if !field.Null && (!exists || value == nil || value == "") {
+		if shouldCheckRequired && !field.Null && (!exists || value == nil || value == "") {
 			cs.addError(field.Name, "字段为必填项")
 			cs.valid = false
 			continue
 		}
 
 		// 应用验证器
-		if exists && value != nil {
+		if shouldRunValidators {
 			for _, validator := range field.Validators {
 				var err error
 				if localeAware, ok := validator.(LocaleAwareValidator); ok {
@@ -560,26 +657,39 @@ type Action string
 const (
 	ActionInsert Action = "insert"
 	ActionUpdate Action = "update"
+	ActionUpsert Action = "upsert"
 	ActionDelete Action = "delete"
 )
 
-// action 存储当前操作类型
-func (cs *Changeset) action() Action {
-	// 如果有主键且非新记录，则为更新
-	// 这里简化处理，实际应该检查主键
-	if len(cs.previousValues) > 0 {
-		return ActionUpdate
+func normalizeAction(action Action) Action {
+	switch action {
+	case ActionUpdate, ActionUpsert, ActionDelete:
+		return action
+	default:
+		return ActionInsert
 	}
-	return ActionInsert
+}
+
+// SetAction 设置当前 changeset 的操作语义。
+func (cs *Changeset) SetAction(action Action) *Changeset {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.action = normalizeAction(action)
+	return cs
+}
+
+// Action 返回当前 changeset 的操作语义。
+func (cs *Changeset) Action() Action {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.action
 }
 
 // ApplyAction 根据操作类型应用不同的验证逻辑
 func (cs *Changeset) ApplyAction(action Action) *Changeset {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-
-	// 可以根据不同的 action 应用不同的验证逻辑
-	// 例如：insert 时验证所有必填字段，update 时只验证变更的字段
-
-	return cs
+	action = normalizeAction(action)
+	cs.action = action
+	return cs.validateLocked(GetValidationLocale(), action)
 }
